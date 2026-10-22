@@ -123,3 +123,54 @@ async def test_real_fetcher_blocks_internal_urls():
     async with Fetcher() as fetcher:
         resp = await CrawlTool(fetcher).crawl(CrawlRequest("http://127.0.0.1/"))
     assert resp.results == [] and resp.failed_results[0]["error"] == "unsafe_url"
+
+
+def test_auth_vem_antes_da_validacao_do_corpo():
+    c = make_client()
+    r = c.post("/v1/search", headers={"Content-Type": "application/json"}, content=b"{nope")
+    assert r.status_code == 401
+    r = c.post("/v1/search", headers={**AUTH, "Content-Type": "application/json"}, content=b"{nope")
+    assert r.status_code == 422 and r.json()["error"]["code"] == "invalid_request"
+
+
+def test_corpo_grande_e_barrado_com_e_sem_content_length():
+    c = make_client()
+    big = b'{"query":"' + b"a" * 200_000 + b'"}'
+    h = {**AUTH, "Content-Type": "application/json"}
+    assert c.post("/v1/search", headers=h, content=big).status_code == 413
+
+    def chunks():                                   # sem Content-Length (chunked)
+        for i in range(0, len(big), 10_000):
+            yield big[i:i + 10_000]
+
+    assert c.post("/v1/search", headers=h, content=chunks()).status_code == 413
+    assert c.post("/v1/search", headers={"Content-Type": "application/json"}, content=big).status_code == 401
+
+
+def test_erros_de_rota_usam_o_mesmo_formato():
+    c = make_client()
+    for r, status in ((c.get("/v1/search", headers=AUTH), 405), (c.get("/v1/nada", headers=AUTH), 404)):
+        assert r.status_code == status and "request_id" in r.json() and "detail" not in r.json()
+
+
+@pytest.mark.parametrize("body", [
+    {"query": "x", "max_results": "5"}, {"query": "x", "max_results": True}, {"query": "x", "include_images": "yes"},
+    {"query": "x", "chunks_per_source": 2.0},
+])
+def test_tipos_estritos(body):
+    assert make_client().post("/v1/search", headers=AUTH, json=body).status_code == 422
+
+
+def test_query_com_caractere_de_controle():
+    r = make_client().post("/v1/search", headers=AUTH, json={"query": "a\u0000b"})
+    assert r.status_code == 400 and r.json()["error"]["code"] == "invalid_request"
+
+
+def test_cabecalhos_de_seguranca_e_corpo_pequeno_no_chunked():
+    c = make_client()
+    r = c.post("/v1/search", headers=AUTH, json={"query": "x"})
+    assert r.headers["cache-control"] == "no-store" and r.headers["x-content-type-options"] == "nosniff"
+    assert c.get("/v1/health").headers["cache-control"] == "no-store"
+    ok = c.post("/v1/search", headers={**AUTH, "Content-Type": "application/json"},
+                content=iter([b'{"query":', b'"x"}']))
+    assert ok.status_code == 200

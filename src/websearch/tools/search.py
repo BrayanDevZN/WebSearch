@@ -56,6 +56,8 @@ class SearchRequest:
         query = (self.query or "").strip()
         if not query:
             raise InvalidRequest("query não pode ser vazia.")
+        if any(ord(c) < 32 and c not in "\t\n\r" or ord(c) == 127 for c in query):
+            raise InvalidRequest("query não pode conter caracteres de controle.")
         if len(query) > MAX_QUERY_CHARS:
             raise InvalidRequest(f"query deve ter no máximo {MAX_QUERY_CHARS} caracteres.")
         if self.search_depth not in DEPTHS:

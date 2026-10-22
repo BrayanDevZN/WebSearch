@@ -9,9 +9,10 @@ from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from typing import Callable, Literal
 
-from fastapi import Depends, FastAPI, Request
+from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from websearch import __version__
@@ -36,7 +37,7 @@ class ApiError(Exception):
 
 
 class Body(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
 
 
 class SearchBody(Body):
@@ -104,11 +105,11 @@ class RateLimiter:
         return None
 
 
-def _extract_key(request: Request) -> str:
-    header = request.headers.get("authorization", "")
+def _key_from(headers: dict[str, str]) -> str:
+    header = headers.get("authorization", "")
     if header.lower().startswith("bearer "):
         return header[7:].strip()
-    return request.headers.get("x-api-key", "").strip()
+    return headers.get("x-api-key", "").strip()
 
 
 def create_app(
@@ -150,47 +151,105 @@ def create_app(
         where = ".".join(str(p) for p in first.get("loc", ()) if p != "body")
         return error_response(422, "invalid_request", f"{where or 'corpo'}: {first.get('msg', 'inválido')}")
 
+    @app.exception_handler(StarletteHTTPException)
+    async def _http_error(_: Request, exc: StarletteHTTPException):
+        codes = {404: "not_found", 405: "method_not_allowed"}
+        return error_response(exc.status_code, codes.get(exc.status_code, "http_error"), str(exc.detail))
+
     @app.exception_handler(Exception)
     async def _unexpected(_: Request, exc: Exception):
         log.error("erro interno: %s", type(exc).__name__)   # sem mensagem: pode conter dados do cliente
         return error_response(500, "internal_error", "Erro interno.")
 
-    async def guard(request: Request) -> None:
-        supplied = _extract_key(request).encode()
-        if not supplied or not hmac.compare_digest(supplied, expected):
-            raise ApiError(401, "unauthorized", "Chave de API ausente ou inválida.",
-                           {"WWW-Authenticate": "Bearer"})
-        wait = limiter.check("key")
-        if wait is not None:
-            raise ApiError(429, "rate_limited", "Limite de requisições excedido.", {"Retry-After": str(wait)})
-        length = request.headers.get("content-length")
-        if length and length.isdigit() and int(length) > MAX_BODY_BYTES:
-            raise ApiError(413, "too_large", "Corpo da requisição grande demais.")
-
     @app.get("/v1/health")
     async def health():
         return {"status": "ok", "version": __version__}
 
-    @app.post("/v1/search", dependencies=[Depends(guard)])
+    @app.post("/v1/search")
     async def search(body: SearchBody):
         data = body.model_dump()
         if data.pop("include_answer"):
             raise ApiError(400, "unsupported", "include_answer não é suportado (sem LLM neste serviço).")
         return (await _run(search_tool.search(SearchRequest(**data)))).to_dict()
 
-    @app.post("/v1/extract", dependencies=[Depends(guard)])
+    @app.post("/v1/extract")
     async def extract(body: ExtractBody):
         return (await _run(extract_tool.extract(ExtractRequest(**body.model_dump())))).to_dict()
 
-    @app.post("/v1/map", dependencies=[Depends(guard)])
+    @app.post("/v1/map")
     async def map_(body: MapBody):
         return (await _run(map_tool.map(CrawlParams(**body.model_dump())))).to_dict()
 
-    @app.post("/v1/crawl", dependencies=[Depends(guard)])
+    @app.post("/v1/crawl")
     async def crawl(body: CrawlBody):
         return (await _run(crawl_tool.crawl(CrawlRequest(**body.model_dump())))).to_dict()
 
+    app.add_middleware(
+        Gate, expected=expected, limiter=limiter,
+        reject=lambda status, code, message, headers=None: error_response(status, code, message, headers),
+    )
     return app
+
+
+class Gate:
+    """Middleware ASGI: segurança de /v1/* **antes** de qualquer leitura/validação do corpo.
+
+    Ordem: chave (401) → limite de taxa (429) → tamanho do corpo (413, também sem Content-Length).
+    Só então a requisição chega ao FastAPI com o corpo já em memória.
+    """
+
+    OPEN_PATHS = {"/v1/health"}
+
+    def __init__(self, app, *, expected: bytes, limiter: RateLimiter, reject):
+        self.app, self.expected, self.limiter, self.reject = app, expected, limiter, reject
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+
+        async def secured_send(message):
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers", []))
+                headers += [(b"cache-control", b"no-store"), (b"x-content-type-options", b"nosniff")]
+                message = {**message, "headers": headers}
+            await send(message)
+
+        if not scope["path"].startswith("/v1/") or scope["path"] in self.OPEN_PATHS:
+            return await self.app(scope, receive, secured_send)
+
+        headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope["headers"]}
+        supplied = _key_from(headers).encode("utf-8", "ignore")
+        if not supplied or not hmac.compare_digest(supplied, self.expected):
+            response = self.reject(401, "unauthorized", "Chave de API ausente ou inválida.", {"WWW-Authenticate": "Bearer"})
+            return await response(scope, receive, secured_send)
+        wait = self.limiter.check("key")
+        if wait is not None:
+            response = self.reject(429, "rate_limited", "Limite de requisições excedido.", {"Retry-After": str(wait)})
+            return await response(scope, receive, secured_send)
+
+        declared = headers.get("content-length", "")
+        too_large = self.reject(413, "too_large", "Corpo da requisição grande demais.")
+        if declared.isdigit() and int(declared) > MAX_BODY_BYTES:
+            return await too_large(scope, receive, secured_send)
+        body, more = b"", True
+        while more:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                return
+            body += message.get("body", b"")
+            more = message.get("more_body", False)
+            if len(body) > MAX_BODY_BYTES:
+                return await too_large(scope, receive, secured_send)
+        sent = False
+
+        async def replay():
+            nonlocal sent
+            if sent:
+                return await receive()
+            sent = True
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        await self.app(scope, replay, secured_send)
 
 
 async def _run(awaitable):
