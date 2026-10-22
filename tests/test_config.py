@@ -99,3 +99,23 @@ def test_ca_bundle_precisa_existir(base_env, tmp_path):
     arquivo.write_text("x")
     base_env["FETCH_CA_BUNDLE"] = str(arquivo)
     assert load_settings(base_env).fetch.ca_bundle == str(arquivo)
+
+
+def test_semantico_desligado_por_padrao(base_env):
+    s = load_settings(base_env).semantic
+    assert s.enabled is False and "potion-multilingual" in s.model and s.cache_dir is None
+
+
+@pytest.mark.parametrize("value,expected", [("true", True), ("TRUE", True), ("1", True), ("on", True),
+                                             ("false", False), ("0", False), ("", False)])
+def test_semantico_flag(base_env, value, expected):
+    base_env["SEMANTIC_ENABLED"] = value
+    assert load_settings(base_env).semantic.enabled is expected
+
+
+def test_semantico_flag_invalida_e_modelo_customizado(base_env):
+    base_env["SEMANTIC_ENABLED"] = "talvez"
+    assert any("SEMANTIC_ENABLED" in p for p in problems(base_env))
+    base_env.update(SEMANTIC_ENABLED="true", SEMANTIC_MODEL="outro/modelo", SEMANTIC_CACHE_DIR="/tmp/x")
+    s = load_settings(base_env).semantic
+    assert (s.model, s.cache_dir) == ("outro/modelo", "/tmp/x")

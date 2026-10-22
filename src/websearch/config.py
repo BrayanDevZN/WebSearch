@@ -37,11 +37,19 @@ class FetchSettings:
 
 
 @dataclass(frozen=True)
+class SemanticSettings:
+    enabled: bool = False                              # precisa de `pip install websearch[semantic]`
+    model: str = "minishlab/potion-multilingual-128M"
+    cache_dir: str | None = None                       # onde o modelo baixado fica (None = ~/.cache/websearch)
+
+
+@dataclass(frozen=True)
 class Settings:
     api_search_key: str = field(repr=False)
     search_providers: tuple[str, ...]
     searxng_url: str | None
     fetch: FetchSettings
+    semantic: SemanticSettings
     host: str
     port: int
     rate_limit_per_minute: int
@@ -118,6 +126,16 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     if fetch.ca_bundle and not os.path.isfile(fetch.ca_bundle):
         problems.append("FETCH_CA_BUNDLE deve apontar para um arquivo existente.")
 
+    # --- busca semântica -----------------------------------------------------------
+    flag = _get(env, "SEMANTIC_ENABLED").lower()
+    if flag not in ("", "true", "false", "1", "0", "yes", "no", "on", "off"):
+        problems.append("SEMANTIC_ENABLED deve ser true ou false.")
+    semantic = SemanticSettings(
+        enabled=flag in ("true", "1", "yes", "on"),
+        model=_get(env, "SEMANTIC_MODEL") or SemanticSettings.model,
+        cache_dir=_get(env, "SEMANTIC_CACHE_DIR") or None,
+    )
+
     # --- servidor ----------------------------------------------------------------
     host = _get(env, "HOST") or "127.0.0.1"
     port = _number(env, "PORT", 8000, int, problems, maximum=65535)
@@ -136,6 +154,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         search_providers=names,
         searxng_url=searxng_url,
         fetch=fetch,
+        semantic=semantic,
         host=host,
         port=port,
         rate_limit_per_minute=rate,

@@ -21,6 +21,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-asyncio>=0.23"]
+semantic = ["fastembed>=0.4", "numpy>=1.26"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
