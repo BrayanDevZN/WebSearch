@@ -73,3 +73,20 @@ def test_limites_customizados(base_env):
     base_env.update(FETCH_CONCURRENCY="2", FETCH_MAX_BYTES="5000")
     s = load_settings(base_env)
     assert (s.fetch.concurrency, s.fetch.max_bytes) == (2, 5000)
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf"])
+def test_timeout_nao_finito_e_rejeitado(base_env, value):
+    base_env["FETCH_TIMEOUT_SECONDS"] = value
+    assert any("FETCH_TIMEOUT_SECONDS" in p for p in problems(base_env))
+
+
+def test_provedores_duplicados_sao_unificados(base_env):
+    base_env["SEARCH_PROVIDERS"] = " DDGS ,ddgs"
+    assert load_settings(base_env).search_providers == ("ddgs",)
+
+
+@pytest.mark.parametrize("url", ["ftp://x", "localhost:8888", "http://", "javascript:alert(1)"])
+def test_searxng_url_invalida(base_env, url):
+    base_env.update(SEARCH_PROVIDERS="searxng", SEARXNG_URL=url)
+    assert any("SEARXNG_URL" in p for p in problems(base_env))

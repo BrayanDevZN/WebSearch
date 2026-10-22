@@ -6,7 +6,9 @@ só o nome da variável.
 
 from __future__ import annotations
 
+import math
 import os
+from urllib.parse import urlsplit
 from dataclasses import dataclass, field
 from typing import Mapping
 
@@ -59,6 +61,9 @@ def _number(env, name, default, kind, problems, minimum=1, maximum=None):
     except ValueError:
         problems.append(f"{name} deve ser {'um número inteiro' if kind is int else 'um número'}.")
         return default
+    if kind is float and not math.isfinite(value):
+        problems.append(f"{name} deve ser um número finito.")
+        return default
     if value < minimum or (maximum is not None and value > maximum):
         bound = f">= {minimum}" if maximum is None else f"entre {minimum} e {maximum}"
         problems.append(f"{name} deve ser {bound}.")
@@ -83,7 +88,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
 
     # --- busca -------------------------------------------------------------------
     raw_providers = _get(env, "SEARCH_PROVIDERS") or "ddgs"
-    names = tuple(p.strip().lower() for p in raw_providers.split(",") if p.strip())
+    names = tuple(dict.fromkeys(p.strip().lower() for p in raw_providers.split(",") if p.strip()))
     bad = [p for p in names if p not in SEARCH_PROVIDER_NAMES]
     if bad:
         problems.append(
@@ -95,6 +100,10 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     searxng_url = _get(env, "SEARXNG_URL") or None
     if "searxng" in names and not searxng_url:
         problems.append("SEARXNG_URL é obrigatória quando SEARCH_PROVIDERS inclui searxng.")
+    elif searxng_url:
+        parts = urlsplit(searxng_url)
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            problems.append("SEARXNG_URL deve ser uma URL http(s) completa, ex.: http://localhost:8888.")
 
     # --- numéricos ---------------------------------------------------------------
     fetch = FetchSettings(
