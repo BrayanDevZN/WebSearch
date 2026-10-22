@@ -14,6 +14,7 @@ dependencies = [
     "trafilatura>=2.0",
     "selectolax>=0.3",
     "ddgs>=9",
+    "pypdf>=4",
     "fastapi>=0.110",
     "uvicorn>=0.29",
 ]
