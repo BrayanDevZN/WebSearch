@@ -106,3 +106,15 @@ async def test_budget_stops_crawl():
 async def test_validation(kw):
     with pytest.raises(InvalidRequest):
         await CrawlTool(SiteFetcher(SITE)).crawl(CrawlRequest(**kw))
+
+
+async def test_robots_com_curinga_e_ancora_no_crawl():
+    f = SiteFetcher(SITE, robots="User-agent: *\nDisallow: /*/deep\nDisallow: /b$")
+    resp = await MapTool(f).map(CrawlParams("https://x.com/", max_depth=2))
+    assert urls(resp) == ["https://x.com/", "https://x.com/a"]
+
+
+async def test_robots_para_agente_especifico_bloqueia_tudo():
+    f = SiteFetcher(SITE, robots="User-agent: WebSearchBot\nDisallow: /")
+    resp = await CrawlTool(f).crawl(CrawlRequest("https://x.com/"))
+    assert resp.results == [] and resp.failed_results == [{"url": "https://x.com/", "error": "robots_disallowed"}]

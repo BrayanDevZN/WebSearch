@@ -12,12 +12,12 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Literal, Sequence
 from urllib.parse import urlsplit
-from urllib.robotparser import RobotFileParser
 
 from websearch.extract.html import ExtractedPage
 from websearch.net.urlsafe import UnsafeURLError, normalize_url
 from websearch.search.filters import canonical_url, clean_domain, matches_domain, url_domain
 from websearch.tools.common import InvalidRequest, PageFetcher, load_page
+from websearch.tools.robots import Robots
 
 MAX_PATTERNS = 20
 MAX_PATTERN_CHARS = 200
@@ -118,7 +118,7 @@ class Crawler:
                 return False
             return not any(p.search(path) for p in exclude_paths)
 
-        robots: dict[str, RobotFileParser | None] = {}
+        robots: dict[str, Robots | None] = {}
 
         async def robots_allow(url: str) -> bool:
             if not params.respect_robots:
@@ -128,7 +128,7 @@ class Crawler:
             if origin not in robots:
                 robots[origin] = await self._load_robots(origin)
             parser = robots[origin]
-            return parser is None or parser.can_fetch(ROBOTS_AGENT, url)
+            return parser is None or parser.can_fetch(url)
 
         result = WalkResult(base_url=root)
         deadline = self._clock() + self._budget
@@ -174,13 +174,11 @@ class Crawler:
             frontier = next_frontier
         return result
 
-    async def _load_robots(self, origin: str) -> RobotFileParser | None:
+    async def _load_robots(self, origin: str) -> Robots | None:
         try:
             fetched = await self._fetcher.fetch(origin + "/robots.txt")
         except Exception:
             return None
         if fetched.status != 200 or not fetched.text or "html" in fetched.content_type:
             return None
-        parser = RobotFileParser()
-        parser.parse(fetched.text.splitlines())
-        return parser
+        return Robots(fetched.text, ROBOTS_AGENT)
