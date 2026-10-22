@@ -159,3 +159,26 @@ async def test_mensagens_nao_vazam_ips_internos():
     with pytest.raises(UnsafeURLError) as e:
         await check_url("https://evil.com/", resolver=r)
     assert "10.9.8.7" not in str(e.value)
+
+
+@pytest.mark.parametrize("url,reason", [
+    ("http://example.com:0/", "port"),
+    ("http://%31%32%37.0.0.1/", "bad_host"),
+    ("http://xn--/", "bad_host"),
+    ("http://-a.com/", "bad_host"),
+    ("http://a-.com/", "bad_host"),
+    ("http://exa%6Dple.com/", "bad_host"),
+])
+async def test_hosts_e_portas_malformados(url, reason):
+    with pytest.raises(UnsafeURLError) as e:
+        await check_url(url, resolver=_pub)
+    assert e.value.reason == reason
+
+
+async def _pub(host, port):
+    return ["93.184.216.34"]
+
+
+@pytest.mark.parametrize("url", ["http://sub-domain.example.com/", "http://a_b.example.com/", "http://xn--bcher-kva.example/", "http://ｅxample.com/"])
+async def test_hosts_validos_continuam_passando(url):
+    assert (await check_url(url, resolver=_pub)).ips

@@ -25,6 +25,7 @@ MAX_URL_LENGTH = 2048
 DEFAULT_ALLOWED_PORTS = (80, 443)
 _DEFAULT_PORT = {"http": 80, "https": 443}
 _CONTROL = re.compile(r"[\x00-\x20\x7f-\x9f]")
+_HOSTNAME = re.compile(r"(?!-)[a-z0-9_-]{1,63}(?<!-)(\.(?!-)[a-z0-9_-]{1,63}(?<!-))*")
 _BLOCKED_SUFFIXES = (".local", ".localhost", ".internal", ".localdomain", ".lan", ".home.arpa")
 _BLOCKED_NAMES = {"localhost", "ip6-localhost", "ip6-loopback", "metadata.google.internal"}
 
@@ -110,7 +111,7 @@ def normalize_url(
     if not host:
         raise UnsafeURLError("no_host", "URL sem host.")
     try:
-        port = parts.port or _DEFAULT_PORT[scheme]
+        port = _DEFAULT_PORT[scheme] if parts.port is None else parts.port
     except ValueError:
         raise UnsafeURLError("bad_port", "Porta inválida.") from None
     if port not in allowed_ports:
@@ -121,6 +122,8 @@ def normalize_url(
         host = host.encode("idna").decode("ascii")
     except UnicodeError:
         raise UnsafeURLError("bad_host", "Host inválido.") from None
+    if ":" not in host and not _HOSTNAME.fullmatch(host):
+        raise UnsafeURLError("bad_host", "Host inválido.")
     if host in _BLOCKED_NAMES or host.endswith(_BLOCKED_SUFFIXES):
         raise UnsafeURLError("blocked_host", "Host interno não permitido.")
 
