@@ -33,6 +33,7 @@ MAX_RESULTS = 20
 MAX_QUERY_CHARS = 400
 MAX_IMAGES = 10
 DEFAULT_BUDGET_SECONDS = 25.0
+DEFAULT_SEARCH_TIMEOUT = 30.0         # teto da etapa de busca (provedores + tentativas + relaxamento)
 
 
 @dataclass
@@ -111,12 +112,15 @@ class SearchResponse:
     request_id: str
     images: list[dict] = field(default_factory=list)
     provider: str | None = None
+    warnings: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         out = {"query": self.query, "results": self.results, "response_time": self.response_time,
                "request_id": self.request_id}
         if self.images:
             out["images"] = self.images
+        if self.warnings:
+            out["warnings"] = self.warnings
         return out
 
 
@@ -127,12 +131,14 @@ class SearchTool:
         fetcher: PageFetcher,
         *,
         budget_seconds: float = DEFAULT_BUDGET_SECONDS,
+        search_timeout: float = DEFAULT_SEARCH_TIMEOUT,
         clock: Callable[[], float] = time.monotonic,
         request_id: Callable[[], str] = new_request_id,
     ):
         self._router = router
         self._fetcher = fetcher
         self._budget = budget_seconds
+        self._search_timeout = search_timeout
         self._clock = clock
         self._request_id = request_id
 
@@ -140,20 +146,36 @@ class SearchTool:
         request.validate()
         started = self._clock()
         query = request.query.strip()
-        outcome = await self._router.search(SearchQuery(
+        try:
+            async with asyncio.timeout(self._search_timeout):
+                outcome = await self._run_router(request, query)
+        except TimeoutError:
+            raise SearchUnavailable(["a busca excedeu o tempo limite"]) from None
+        if not outcome.hits and outcome.errors and not any(e.endswith("sem resultados") for e in outcome.errors):
+            raise SearchUnavailable(outcome.errors)
+        return await self._finish(request, query, outcome, started)
+
+    async def _run_router(self, request: SearchRequest, query: str):
+        return await self._router.search(SearchQuery(
             query=query, max_results=request.max_results, topic=request.topic,
             time_range=request.time_range, start_date=request.start_date, end_date=request.end_date,
             include_domains=tuple(request.include_domains), exclude_domains=tuple(request.exclude_domains),
             region=request.region,
         ))
-        if not outcome.hits and outcome.errors and not any(e.endswith("sem resultados") for e in outcome.errors):
-            raise SearchUnavailable(outcome.errors)
 
+    async def _finish(self, request: SearchRequest, query: str, outcome, started: float) -> SearchResponse:
         hits = outcome.hits
         pages = await self._fetch_pages(request, hits)
         results, images = self._build(request, query, hits, pages)
+        warnings: list[str] = []
+        if outcome.relaxed:
+            warnings.append("O provedor não devolveu resultados com o filtro de domínio; a busca foi refeita "
+                            "com o domínio como palavra e filtrada depois.")
+        if not hits:
+            warnings.append("Nenhum resultado. Os provedores de busca podem estar limitando ou bloqueando; "
+                            "tente de novo em instantes ou simplifique a consulta/filtros.")
         return SearchResponse(
-            query=query, results=results, images=images, provider=outcome.provider,
+            query=query, results=results, images=images, provider=outcome.provider, warnings=warnings,
             response_time=round(self._clock() - started, 2), request_id=self._request_id(),
         )
 

@@ -127,3 +127,36 @@ async def test_no_results_vs_provider_failure():
 async def test_validation(kw):
     with pytest.raises(InvalidRequest):
         await make([hit(0)]).search(SearchRequest(**kw))
+
+
+async def test_aviso_quando_vazio_e_nada_quando_normal():
+    empty = await make([]).search(SearchRequest("x"))
+    assert empty.results == [] and "warnings" in empty.to_dict() and "Nenhum resultado" in empty.warnings[0]
+    normal = await make([hit(0)]).search(SearchRequest("x", search_depth="fast"))
+    assert "warnings" not in normal.to_dict()
+
+
+async def test_aviso_de_consulta_relaxada():
+    class OnlyRelaxed:
+        name = "fake"
+
+        async def search(self, q):
+            return [] if q.include_domains else [SearchHit("t", "https://s0.com/a", "python", "fake", 0)]
+
+    tool = SearchTool(SearchRouter([OnlyRelaxed()]), FakeFetcher())
+    resp = await tool.search(SearchRequest("python", search_depth="fast", include_domains=["s0.com"]))
+    assert [r["url"] for r in resp.results] == ["https://s0.com/a"] and "refeita" in resp.warnings[0]
+
+
+async def test_busca_lenta_estoura_o_teto_e_vira_indisponivel():
+    class Slow:
+        name = "slow"
+
+        async def search(self, q):
+            await asyncio.sleep(5)
+            return []
+
+    tool = SearchTool(SearchRouter([Slow()]), FakeFetcher(), search_timeout=0.05)
+    with pytest.raises(SearchUnavailable) as e:
+        await tool.search(SearchRequest("x"))
+    assert "tempo limite" in str(e.value)

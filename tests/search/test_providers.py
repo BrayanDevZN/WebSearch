@@ -198,9 +198,9 @@ async def test_ddgs_vazio_de_verdade_desiste_depois_da_nova_tentativa():
         return None
 
     assert await DDGSProvider(retry_delay=0, search_fn=fn, sleep=sleep).search(SearchQuery("q")) == []
-    assert len(calls) == 2
+    assert len(calls) == 3                                       # auto → duckduckgo → auto
     calls.clear()
-    assert await DDGSProvider(retry_delay=0, search_fn=fn, sleep=sleep, empty_retries=0).search(SearchQuery("q")) == []
+    assert await DDGSProvider(retry_delay=0, search_fn=fn, sleep=sleep, backends=("auto",)).search(SearchQuery("q")) == []
     assert len(calls) == 1
 
 
@@ -214,3 +214,17 @@ async def test_ddgs_erro_real_nao_e_repetido_pelo_provedor():
     with pytest.raises(SearchProviderError):
         await DDGSProvider(retry_delay=0, search_fn=fn).search(SearchQuery("q"))
     assert len(calls) == 1
+
+
+async def test_ddgs_reveza_mecanismos_entre_tentativas_vazias():
+    backends, replies = [], [[], [], [{"href": "http://a.com", "title": "t", "body": "b"}]]
+
+    def fn(kind, text, **kw):
+        backends.append(kw.get("backend", "auto"))
+        return replies.pop(0)
+
+    async def sleep(_):
+        return None
+
+    hits = await DDGSProvider(search_fn=fn, sleep=sleep).search(SearchQuery("q"))
+    assert backends == ["auto", "duckduckgo", "auto"] and [h.url for h in hits] == ["http://a.com"]

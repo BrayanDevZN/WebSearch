@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import re
 from datetime import datetime
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Sequence
 
 from websearch.search.base import SearchHit, SearchProviderError, SearchQuery
 from websearch.search.filters import valid_domain
@@ -20,7 +20,7 @@ SearchFn = Callable[..., list[dict[str, Any]]]
 def _default_search(kind: str, query: str, **kwargs: Any) -> list[dict[str, Any]]:
     from ddgs import DDGS
 
-    client = DDGS(timeout=10)
+    client = DDGS(timeout=8)
     return getattr(client, kind)(query, **kwargs)
 
 
@@ -64,15 +64,16 @@ class DDGSProvider:
         search_fn: SearchFn | None = None,
         *,
         overfetch: int = 2,
-        empty_retries: int = 1,
+        backends: Sequence[str] = ("auto", "duckduckgo", "auto"),
         retry_delay: float = 0.7,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ):
         self._search = search_fn or _default_search
         self._overfetch = max(1, overfetch)
         # O ddgs às vezes responde "sem resultados" para uma consulta que acabou de funcionar
-        # (bloqueio/limite silencioso dos mecanismos); uma segunda tentativa costuma resolver.
-        self._empty_retries = max(0, empty_retries)
+        # (bloqueio/limite silencioso dos mecanismos). Cada tentativa vazia passa ao próximo mecanismo
+        # da lista ("auto" = escolha do próprio ddgs); a lista curta limita a latência no pior caso.
+        self._backends = tuple(backends) or ("auto",)
         self._retry_delay = retry_delay
         self._sleep = sleep
 
@@ -85,9 +86,10 @@ class DDGSProvider:
             kwargs["region"] = query.region
         text = build_query_text(query)
         rows: Any = []
-        for attempt in range(self._empty_retries + 1):
+        for attempt, backend in enumerate(self._backends):
             try:
-                rows = await asyncio.to_thread(self._search, kind, text, **kwargs)
+                extra = {} if backend == "auto" else {"backend": backend}
+                rows = await asyncio.to_thread(self._search, kind, text, **kwargs, **extra)
             except Exception as exc:  # a biblioteca levanta tipos próprios; classificamos pelo nome
                 error = self._classify(exc)
                 if not isinstance(error, _NoResults):
@@ -95,7 +97,7 @@ class DDGSProvider:
                 rows = []
             if rows:
                 break
-            if attempt < self._empty_retries:
+            if attempt < len(self._backends) - 1:
                 await self._sleep(self._retry_delay)
         return [hit for i, row in enumerate(rows if isinstance(rows, list) else []) if (hit := self._to_hit(row, i, kind))]
 

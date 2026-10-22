@@ -39,6 +39,7 @@ async def no_sleep(_):
 
 
 def router(*providers, clock=None, **kw):
+    kw.setdefault("cache_ttl", 0)                 # os testes antigos repetem a mesma consulta de propósito
     return SearchRouter(providers, sleep=no_sleep, clock=clock or Clock(), **kw)
 
 
@@ -146,3 +147,75 @@ async def test_provedor_com_bug_nao_derruba_busca_e_cai_para_o_proximo():
     out = await SearchRouter([Buggy(), good], sleep=no_sleep).search(SearchQuery("q"))
     assert out.provider == "good" and out.errors == ["buggy: erro inesperado (RuntimeError)"]
     assert "segredo" not in "".join(out.errors)
+
+
+# ---------------------------------------------------------------- cache e relaxamento --
+class Scripted:
+    """Provedor que responde conforme o texto da consulta recebida."""
+
+    def __init__(self, name, by_text):
+        self.name, self.by_text, self.seen = name, by_text, []
+
+    async def search(self, query):
+        self.seen.append(query)
+        return list(self.by_text.get(query.query, []))
+
+
+async def test_cache_evita_nova_chamada_e_expira():
+    clock = Clock()
+    a = Fake("a", hits("a", "https://x.com/1"))
+    r = router(a, clock=clock, cache_ttl=100)
+    first = await r.search(SearchQuery("Python  "))
+    second = await r.search(SearchQuery("python"))              # mesma consulta (normalizada)
+    assert a.calls == 1 and not first.cached and second.cached and second.hits == first.hits
+    second.hits.clear()                                          # a cópia não contamina o cache
+    assert len((await r.search(SearchQuery("python"))).hits) == 1
+    clock.now = 101
+    assert not (await r.search(SearchQuery("python"))).cached and a.calls == 2
+
+
+async def test_cache_nao_guarda_vazio_e_diferencia_parametros():
+    a = Fake("a", [])
+    r = router(a, cache_ttl=100)
+    await r.search(SearchQuery("q")); await r.search(SearchQuery("q"))
+    assert a.calls == 2                                          # vazio não é cacheado
+    b = Fake("b", hits("b", "https://x.com/1"))
+    r = router(b, cache_ttl=100)
+    await r.search(SearchQuery("q", max_results=5)); await r.search(SearchQuery("q", max_results=3))
+    await r.search(SearchQuery("q", include_domains=["x.com"])); await r.search(SearchQuery("q", include_domains=("x.com",)))
+    assert b.calls == 3                                          # lista e tupla são a mesma chave
+
+
+async def test_cache_tem_tamanho_maximo():
+    a = Fake("a", hits("a", "https://x.com/1"))
+    r = router(a, cache_ttl=100, cache_size=2)
+    for text in ("um", "dois", "tres"):
+        await r.search(SearchQuery(text))
+    assert a.calls == 3
+    await r.search(SearchQuery("um"))                            # foi expulso
+    assert a.calls == 4
+
+
+async def test_site_vazio_e_relaxado_para_palavra_e_filtrado_depois():
+    prov = Scripted("p", {"fastapi middleware fastapi.tiangolo.com": [
+        SearchHit("o", "https://fastapi.tiangolo.com/tutorial/middleware/", "s", "p", 0),
+        SearchHit("x", "https://outro.com/fastapi", "s", "p", 1),
+    ]})
+    out = await router(prov).search(SearchQuery("fastapi middleware", max_results=2, include_domains=["fastapi.tiangolo.com"]))
+    assert out.relaxed and [h.url for h in out.hits] == ["https://fastapi.tiangolo.com/tutorial/middleware/"]
+    assert prov.seen[0].include_domains == ("fastapi.tiangolo.com",) or list(prov.seen[0].include_domains) == ["fastapi.tiangolo.com"]
+    assert prov.seen[1].include_domains == () and prov.seen[1].max_results == 8      # sem operador, busca mais
+
+
+async def test_relaxamento_nao_acontece_sem_filtro_nem_quando_normal_funciona():
+    prov = Scripted("p", {"q": [], "ok": [SearchHit("o", "https://a.com/", "s", "p", 0)]})
+    out = await router(prov).search(SearchQuery("q"))
+    assert not out.hits and len(prov.seen) == 1
+    out = await router(prov).search(SearchQuery("ok", include_domains=["a.com"]))
+    assert out.hits and not out.relaxed and len(prov.seen) == 2
+
+
+async def test_relaxado_tambem_vazio_devolve_vazio_com_erros_dos_dois_passos():
+    prov = Scripted("p", {})
+    out = await router(prov).search(SearchQuery("q", exclude_domains=["a.com"]))
+    assert not out.hits and not out.relaxed and len(prov.seen) == 2 and len(out.errors) == 2
