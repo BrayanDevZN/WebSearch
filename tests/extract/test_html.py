@@ -176,3 +176,18 @@ def test_pdf_corrompido_nao_levanta():
 def test_despacha_pdf():
     p = extract_from_fetch(fr("application/pdf", None, body=minimal_pdf("Ola PDF"), url="https://a.com/a.pdf"))
     assert "Ola PDF" in p.text
+
+
+def test_base_href_e_respeitado_em_links_e_imagens():
+    p = extract_html("<base href='https://cdn.com/x/'><body><article><a href='z'>z</a><img src='i.png'>"
+                     "<p>" + "Texto principal do artigo com bastante conteúdo. " * 10 + "</p></article></body>",
+                     "https://ex.com/a/b")
+    assert [l.url for l in p.links] == ["https://cdn.com/x/z"]
+    assert [i.url for i in p.images] == ["https://cdn.com/x/i.png"]
+
+
+def test_base_href_invalido_cai_para_url_da_pagina():
+    p = extract_html("<base href='javascript:x'><body><article><a href='z'>z</a><p>"
+                     + "Texto principal do artigo com bastante conteúdo. " * 10 + "</p></article></body>",
+                     "https://ex.com/a/b")
+    assert [l.url for l in p.links] == ["https://ex.com/a/z"]

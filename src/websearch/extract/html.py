@@ -152,8 +152,10 @@ def extract_html(html: str, url: str, fmt: Format = "markdown") -> ExtractedPage
     if not html or not html.strip():
         return page
     tree = HTMLParser(html)
-    page.links = _links(tree, url)
-    page.images = _images(tree, url)
+    base = tree.css_first("base[href]")
+    base_url = (_http_url(url, base.attributes.get("href") or "") if base is not None else None) or url
+    page.links = _links(tree, base_url)
+    page.images = _images(tree, base_url)
     page.favicon = _favicon(tree, url)
 
     try:
