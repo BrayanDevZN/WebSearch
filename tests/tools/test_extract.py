@@ -56,3 +56,20 @@ async def test_timeout_budget():
 async def test_validation(kw):
     with pytest.raises(InvalidRequest):
         await tool(FakeFetcher()).extract(ExtractRequest(**kw))
+
+
+async def test_url_gigante_e_truncada_na_resposta():
+    resp = await tool(FakeFetcher()).extract(ExtractRequest(["https://a.com/" + "x" * 3000]))
+    assert resp.results == [] and resp.failed_results[0]["error"] == "too_long"
+    assert len(resp.failed_results[0]["url"]) <= 301
+
+
+async def test_urls_internas_vao_para_failed_com_fetcher_real():
+    from websearch.net.fetcher import Fetcher
+
+    async with Fetcher() as real:
+        resp = await ExtractTool(real).extract(
+            ExtractRequest(["http://127.0.0.1/", "http://169.254.169.254/latest", "http://[::1]/", "http://localhost/"]))
+    assert resp.results == []
+    assert {f["error"] for f in resp.failed_results} <= {"unsafe_url", "private_ip", "blocked_host"}
+    assert len(resp.failed_results) == 4

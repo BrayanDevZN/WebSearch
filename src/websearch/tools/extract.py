@@ -13,6 +13,13 @@ from websearch.rank.select import join_chunks, select_chunks
 from websearch.tools.common import InvalidRequest, PageFetcher, PageOutcome, load_page, new_request_id
 
 MAX_URLS = 20
+MAX_ECHO_CHARS = 300
+
+
+def _echo(url: str) -> str:
+    """URL do cliente devolvida em `failed_results`, truncada para não inflar a resposta."""
+    return url if len(url) <= MAX_ECHO_CHARS else url[:MAX_ECHO_CHARS] + "…"
+
 MAX_IMAGES_PER_PAGE = 20
 DEFAULT_BUDGET_SECONDS = 40.0
 
@@ -83,7 +90,7 @@ class ExtractTool:
             try:
                 url = normalize_url(raw.strip())[0]
             except UnsafeURLError as exc:
-                failed.append({"url": raw.strip(), "error": exc.reason})
+                failed.append({"url": _echo(raw.strip()), "error": exc.reason})
                 continue
             if url in seen:
                 continue
