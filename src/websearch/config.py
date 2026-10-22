@@ -10,15 +10,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Mapping
 
-LLM_PROVIDERS = ("local", "groq", "openai")
-LOCAL_SIZES = ("low", "medium", "high")
 SEARCH_PROVIDER_NAMES = ("ddgs", "searxng")
-
-DEFAULT_LOCAL_MODELS = {
-    "low": "qwen3:4b",
-    "medium": "qwen3:14b",
-    "high": "qwen3:32b",
-}
 
 MIN_KEY_LENGTH = 16
 RECOMMENDED_KEY_LENGTH = 32
@@ -33,14 +25,6 @@ class ConfigError(Exception):
 
 
 @dataclass(frozen=True)
-class LLMSettings:
-    provider: str
-    model: str
-    api_key: str | None = field(default=None, repr=False)
-    base_url: str | None = None
-
-
-@dataclass(frozen=True)
 class FetchSettings:
     timeout_seconds: float = 15.0
     max_bytes: int = 2_000_000
@@ -50,38 +34,16 @@ class FetchSettings:
 
 
 @dataclass(frozen=True)
-class AgentLimits:
-    max_iterations: int = 6
-    max_searches: int = 8
-    max_pages: int = 10
-    timeout_seconds: float = 120.0
-    max_context_tokens: int = 6000
-    page_max_chars: int = 6000
-
-
-@dataclass(frozen=True)
 class Settings:
     api_search_key: str = field(repr=False)
-    llm: LLMSettings
     search_providers: tuple[str, ...]
     searxng_url: str | None
     fetch: FetchSettings
-    limits: AgentLimits
     host: str
     port: int
     rate_limit_per_minute: int
     log_level: str
     warnings: tuple[str, ...] = ()
-
-
-def resolve_local_model(env: Mapping[str, str]) -> str:
-    """LOCAL_MODEL > LOCAL_MODEL_<PORTE> > padrão do porte."""
-    explicit = (env.get("LOCAL_MODEL") or "").strip()
-    if explicit:
-        return explicit
-    size = (env.get("LOCAL_MODEL_SIZE") or "medium").strip().lower()
-    override = (env.get(f"LOCAL_MODEL_{size.upper()}") or "").strip()
-    return override or DEFAULT_LOCAL_MODELS[size]
 
 
 def _get(env: Mapping[str, str], name: str) -> str:
@@ -119,35 +81,6 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     elif len(api_key) < RECOMMENDED_KEY_LENGTH:
         warnings.append(f"API_SEARCH_KEY tem menos de {RECOMMENDED_KEY_LENGTH} caracteres; use uma chave maior.")
 
-    # --- LLM ---------------------------------------------------------------------
-    provider = _get(env, "LLM_PROVIDER").lower()
-    llm: LLMSettings | None = None
-    if not provider:
-        problems.append(f"LLM_PROVIDER é obrigatório. Valores aceitos: {', '.join(LLM_PROVIDERS)}.")
-    elif provider not in LLM_PROVIDERS:
-        problems.append(f"LLM_PROVIDER inválido. Valores aceitos: {', '.join(LLM_PROVIDERS)}.")
-    elif provider == "local":
-        size = _get(env, "LOCAL_MODEL_SIZE").lower() or "medium"
-        if size not in LOCAL_SIZES:
-            problems.append(f"LOCAL_MODEL_SIZE inválido. Valores aceitos: {', '.join(LOCAL_SIZES)}.")
-        else:
-            llm = LLMSettings(
-                provider="local",
-                model=resolve_local_model(env),
-                api_key=None,
-                base_url=_get(env, "LOCAL_BASE_URL") or "http://localhost:11434/v1",
-            )
-    else:
-        prefix = provider.upper()
-        key = _get(env, f"{prefix}_API_KEY")
-        model = _get(env, f"{prefix}_MODEL")
-        if not key:
-            problems.append(f"{prefix}_API_KEY é obrigatória quando LLM_PROVIDER={provider}.")
-        if not model:
-            problems.append(f"{prefix}_MODEL é obrigatório quando LLM_PROVIDER={provider}.")
-        if key and model:
-            llm = LLMSettings(provider=provider, model=model, api_key=key)
-
     # --- busca -------------------------------------------------------------------
     raw_providers = _get(env, "SEARCH_PROVIDERS") or "ddgs"
     names = tuple(p.strip().lower() for p in raw_providers.split(",") if p.strip())
@@ -171,14 +104,6 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         concurrency=_number(env, "FETCH_CONCURRENCY", 5, int, problems, maximum=50),
         user_agent=_get(env, "FETCH_USER_AGENT") or FetchSettings.user_agent,
     )
-    limits = AgentLimits(
-        max_iterations=_number(env, "AGENT_MAX_ITERATIONS", 6, int, problems, maximum=50),
-        max_searches=_number(env, "AGENT_MAX_SEARCHES", 8, int, problems, maximum=100),
-        max_pages=_number(env, "AGENT_MAX_PAGES", 10, int, problems, maximum=100),
-        timeout_seconds=_number(env, "AGENT_TIMEOUT_SECONDS", 120.0, float, problems),
-        max_context_tokens=_number(env, "AGENT_MAX_CONTEXT_TOKENS", 6000, int, problems, minimum=500),
-        page_max_chars=_number(env, "PAGE_MAX_CHARS", 6000, int, problems, minimum=200),
-    )
 
     # --- servidor ----------------------------------------------------------------
     host = _get(env, "HOST") or "127.0.0.1"
@@ -192,15 +117,12 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
 
     if problems:
         raise ConfigError(problems)
-    assert llm is not None
 
     return Settings(
         api_search_key=api_key,
-        llm=llm,
         search_providers=names,
         searxng_url=searxng_url,
         fetch=fetch,
-        limits=limits,
         host=host,
         port=port,
         rate_limit_per_minute=rate,
