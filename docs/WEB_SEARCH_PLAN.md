@@ -41,6 +41,8 @@ limite de taxa, então há reserva e *backoff*) e SearXNG (opcional, auto-hosped
 
 ## 2. Etapas
 
+**Status: etapas 1–11 concluídas** (testes de rede real escritos, mas não executáveis no sandbox de desenvolvimento).
+
 Cada etapa termina com: testes em `tests/` passando → commit na `main` → tentativa de push.
 
 | # | Etapa | Entrega | Testes |
@@ -50,7 +52,7 @@ Cada etapa termina com: testes em `tests/` passando → commit na `main` → ten
 | 3 | Fetcher HTTP seguro | `net/fetcher.py`: limite de tamanho/tempo, redirecionamentos revalidados, charset | `MockTransport`, redirecionamento para interno |
 | 4 | Extração de conteúdo | `extract/html.py`: título, texto principal (markdown/texto), data, links, imagens, favicon | HTML de exemplo |
 | 5 | Trechos e ranking | `extract/chunk.py`, `rank/bm25.py`: divisão, BM25, seleção dos melhores trechos | ordenação, trechos, scores |
-| 6 | Provedores de busca | `search/base.py`, `ddg.py`, `searxng.py`, `fallback.py`: interface, filtros, dedupe, *backoff* | provedores falsos, filtros |
+| 6 | Provedores de busca | `search/base.py`, `ddg.py`, `searxng.py`, `router.py`: interface, filtros, dedupe, *backoff* | provedores falsos, filtros |
 | 7 | Pipeline `search` | `tools/search.py`: profundidades, formato Tavily, paralelismo, orçamento | pipeline completo com falsos |
 | 8 | `extract` | `tools/extract.py`: várias URLs, `failed_results`, `query`, `chunks_per_source` | sucesso/falha parcial |
 | 9 | `map` e `crawl` | `tools/map.py`, `tools/crawl.py`: BFS, regex, robots.txt, limites | site falso em memória |
