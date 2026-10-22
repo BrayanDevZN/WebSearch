@@ -142,3 +142,23 @@ async def test_searxng_resposta_invalida_e_rede():
 async def test_searxng_json_sem_results():
     assert await sx(lambda r: httpx.Response(200, json={"foo": 1})).search(SearchQuery("q")) == []
     assert await sx(lambda r: httpx.Response(200, json=[1, 2])).search(SearchQuery("q")) == []
+
+
+async def test_ddgs_ignora_linhas_e_campos_nao_textuais():
+    import asyncio  # noqa: F401
+    rows = [{"href": "http://a.com", "title": None, "body": 5}, {"href": ["x"]}, None, "texto",
+            {"url": "http://u.com", "title": "t", "body": "Jun 15, 2026 · oi"}]
+    hits = await DDGSProvider(search_fn=lambda k, q, **kw: rows).search(SearchQuery("q"))
+    assert [h.url for h in hits] == ["http://a.com", "http://u.com"]
+    assert hits[0].title == "" and hits[0].snippet == "" and hits[1].published_date == "2026-06-15"
+    assert await DDGSProvider(search_fn=lambda k, q, **kw: "string").search(SearchQuery("q")) == []
+
+
+@pytest.mark.parametrize("payload", [
+    {"results": [{"url": "http://a.com", "title": 5, "content": None}]},
+    {"results": [None, "x", {"url": 123}, {"url": "http://a.com", "content": ["lista"], "publishedDate": 7}]},
+])
+async def test_searxng_resiste_a_json_estranho(payload):
+    transport = httpx.MockTransport(lambda r: httpx.Response(200, json=payload))
+    hits = await SearXNGProvider("http://s", transport=transport).search(SearchQuery("q"))
+    assert [h.url for h in hits] == ["http://a.com"] and hits[0].snippet == "" and hits[0].published_date is None

@@ -9,7 +9,7 @@ from __future__ import annotations
 import httpx
 
 from websearch.search.base import SearchHit, SearchProviderError, SearchQuery
-from websearch.search.ddg import build_query_text
+from websearch.search.ddg import build_query_text, text_of
 
 _TIME_RANGE = {"day": "day", "week": "week", "month": "month", "year": "year"}
 
@@ -55,15 +55,15 @@ class SearXNGProvider:
         rows = payload.get("results") if isinstance(payload, dict) else None
         hits: list[SearchHit] = []
         for i, row in enumerate(rows or []):
-            url = (row.get("url") or "").strip() if isinstance(row, dict) else ""
+            url = text_of(row.get("url")) if isinstance(row, dict) else ""
             if not url:
                 continue
             hits.append(SearchHit(
-                title=(row.get("title") or "").strip(),
+                title=text_of(row.get("title")),
                 url=url,
-                snippet=(row.get("content") or "").strip(),
+                snippet=text_of(row.get("content")),
                 provider=self.name,
                 position=i,
-                published_date=row.get("publishedDate") or None,
+                published_date=text_of(row.get("publishedDate")) or None,
             ))
         return hits

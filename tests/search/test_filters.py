@@ -75,3 +75,25 @@ def test_deduplica_mantendo_o_primeiro():
 def test_descarta_urls_nao_http():
     hits = [hit("javascript:alert(1)"), hit("ftp://a.com/x"), hit("https://a.com/ok")]
     assert [h.url for h in apply_filters(hits, SearchQuery("q"))] == ["https://a.com/ok"]
+
+
+import pytest as _pytest
+
+from websearch.search.base import SearchHit as _Hit, SearchQuery as _Query
+from websearch.search.ddg import build_query_text as _build
+from websearch.search.filters import apply_filters as _apply, canonical_url as _canon
+
+
+@_pytest.mark.parametrize("url", ["http://a.com:abc/", "http://[::1", "http://a.com:99999/x", "https://"])
+def test_url_malformada_nao_derruba_o_filtro(url):
+    ok = _Hit("t", "https://ok.com/x", "s", "p", 1)
+    out = _apply([_Hit("t", url, "s", "p", 0), ok], _Query("q", include_domains=["ok.com"]))
+    assert out == [ok]
+    assert _apply([_Hit("t", url, "s", "p", 0)], _Query("q")) in ([], [_Hit("t", url, "s", "p", 0)])
+    _canon(url)  # não levanta
+
+
+def test_dominios_com_operadores_nao_injetam_na_consulta():
+    q = _Query("q", include_domains=['a.com" OR site:evil.com', "x y", "https://www.Site.com/p"],
+               exclude_domains=["bad.com -foo", "ok.org"])
+    assert _build(q) == "q site:site.com -site:ok.org"

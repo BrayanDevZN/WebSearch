@@ -133,3 +133,16 @@ def test_factory_segue_a_ordem_do_env():
     s = load_settings({"API_SEARCH_KEY": "k" * 40, "LLM_PROVIDER": "local",
                        "SEARCH_PROVIDERS": "searxng,ddgs", "SEARXNG_URL": "http://localhost:8888"})
     assert [p.name for p in build_router(s)._providers] == ["searxng", "ddgs"]
+
+
+async def test_provedor_com_bug_nao_derruba_busca_e_cai_para_o_proximo():
+    class Buggy:
+        name = "buggy"
+
+        async def search(self, q):
+            raise RuntimeError("segredo interno")
+
+    good = Fake("good", hits("good", "https://a.com/x"))
+    out = await SearchRouter([Buggy(), good], sleep=no_sleep).search(SearchQuery("q"))
+    assert out.provider == "good" and out.errors == ["buggy: erro inesperado (RuntimeError)"]
+    assert "segredo" not in "".join(out.errors)

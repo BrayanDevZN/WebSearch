@@ -53,6 +53,9 @@ class SearchRouter:
                 if exc.rate_limited:
                     self._blocked_until[provider.name] = self._clock() + self._cooldown
                 continue
+            except Exception as exc:  # provedor com bug: não derruba a busca, tenta o próximo
+                errors.append(f"{provider.name}: erro inesperado ({type(exc).__name__})")
+                continue
             hits = apply_filters(hits, query)[: query.max_results]
             if hits:
                 return SearchOutcome(hits, provider.name, errors)

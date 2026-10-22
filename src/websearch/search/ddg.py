@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Any, Callable
 
 from websearch.search.base import SearchHit, SearchProviderError, SearchQuery
+from websearch.search.filters import valid_domain
 
 _TIMELIMIT = {"day": "d", "week": "w", "month": "m", "year": "y"}
 # O texto dos resultados do ddgs costuma começar com a data: "Jun 15, 2026 · Linus Torvalds…"
@@ -39,15 +40,20 @@ def _split_leading_date(body: str) -> tuple[str | None, str]:
 def build_query_text(query: SearchQuery) -> str:
     """Aplica include/exclude de domínio como operadores `site:` (e filtra de novo depois)."""
     text = query.query.strip()
-    includes = [d for d in query.include_domains if d.strip()]
+    includes = [d for d in map(valid_domain, query.include_domains) if d]
     if len(includes) == 1:
         text += f" site:{includes[0]}"
     elif includes:
         text += " (" + " OR ".join(f"site:{d}" for d in includes) + ")"
-    for d in query.exclude_domains:
-        if d.strip():
+    for d in map(valid_domain, query.exclude_domains):
+        if d:
             text += f" -site:{d}"
     return text
+
+
+def text_of(value: Any) -> str:
+    """Campo de resposta externa como texto (None, números e listas não derrubam o provedor)."""
+    return value.strip() if isinstance(value, str) else ""
 
 
 class DDGSProvider:
@@ -72,7 +78,7 @@ class DDGSProvider:
             if isinstance(error, _NoResults):
                 return []
             raise error from None
-        return [hit for i, row in enumerate(rows or []) if (hit := self._to_hit(row, i, kind))]
+        return [hit for i, row in enumerate(rows if isinstance(rows, list) else []) if (hit := self._to_hit(row, i, kind))]
 
     def _classify(self, exc: Exception) -> Exception:
         name = type(exc).__name__
@@ -85,16 +91,18 @@ class DDGSProvider:
             return _NoResults()
         return SearchProviderError(self.name, f"erro: {name}", retryable=name == "DDGSException")
 
-    def _to_hit(self, row: dict[str, Any], index: int, kind: str) -> SearchHit | None:
-        url = (row.get("href") or row.get("url") or "").strip()
+    def _to_hit(self, row: Any, index: int, kind: str) -> SearchHit | None:
+        if not isinstance(row, dict):
+            return None
+        url = text_of(row.get("href")) or text_of(row.get("url"))
         if not url:
             return None
-        body = row.get("body") or ""
-        published = row.get("date") if kind == "news" else None
+        body = text_of(row.get("body"))
+        published = text_of(row.get("date")) or None if kind == "news" else None
         if kind == "text":
             published, body = _split_leading_date(body)
         return SearchHit(
-            title=(row.get("title") or "").strip(),
+            title=text_of(row.get("title")),
             url=url,
             snippet=body.strip(),
             provider=self.name,

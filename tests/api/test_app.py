@@ -83,14 +83,12 @@ def test_provider_outage_is_502_without_details():
     assert r.status_code == 502 and "segredo" not in r.text
 
 
-def test_unexpected_error_is_500_and_generic():
-    class Boom:
-        name = "boom"
+def test_unexpected_error_is_500_and_generic(monkeypatch):
+    async def boom(self, request):
+        raise RuntimeError("detalhe interno")
 
-        async def search(self, q):
-            raise RuntimeError("detalhe interno")
-
-    r = make_client(Boom()).post("/v1/search", headers=AUTH, json={"query": "x"})
+    monkeypatch.setattr("websearch.tools.search.SearchTool.search", boom)
+    r = make_client().post("/v1/search", headers=AUTH, json={"query": "x"})
     assert r.status_code == 500 and r.json()["error"]["code"] == "internal_error" and "detalhe" not in r.text
 
 
