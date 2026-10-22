@@ -308,3 +308,14 @@ def test_decode_utf8_por_padrao_e_fallback():
 
 def test_decode_charset_desconhecido_cai_no_proximo():
     assert decode_body("ok".encode(), "text/html; charset=bogus-xyz") == "ok"
+
+
+@pytest.mark.parametrize("body,header,expected", [
+    (b"\xef\xbb\xbfola", "text/html; charset=utf-8", "ola"),
+    (b"\xef\xbb\xbfola", None, "ola"),
+    ("﻿oi".encode("utf-16"), "text/html", "oi"),
+    (b"\xef\xbb\xbf\xff\xfe", "text/html; charset=latin-1", "ï»¿ÿþ"),
+])
+def test_decode_body_remove_bom(body, header, expected):
+    from websearch.net.fetcher import decode_body
+    assert decode_body(body, header) == expected

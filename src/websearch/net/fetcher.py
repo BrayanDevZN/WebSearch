@@ -62,6 +62,12 @@ def _charset_from_header(header: str | None) -> str | None:
 
 def decode_body(body: bytes, content_type_header: str | None) -> str:
     """Decodifica por: charset do header → <meta charset> → UTF-8 → cp1252."""
+    for bom, name in ((b"\xef\xbb\xbf", "utf-8"), (b"\xff\xfe", "utf-16"), (b"\xfe\xff", "utf-16")):
+        if body.startswith(bom):
+            try:
+                return body.decode(name).lstrip("\ufeff")
+            except UnicodeDecodeError:
+                break
     candidates: list[str] = []
     declared = _charset_from_header(content_type_header)
     if declared:
