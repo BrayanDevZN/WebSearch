@@ -5,7 +5,7 @@ feita só com componentes gratuitos (ddgs/DuckDuckGo, SearXNG opcional). Pensada
 de pesquisa de um agente de IA, que ainda **não** faz parte deste repositório.
 
 > **Status: etapas 1–11 do [plano](docs/WEB_SEARCH_PLAN.md) concluídas e revisadas etapa por etapa
-> com casos adversariais.** 361 testes offline passam. Os 6 testes com internet real
+> com casos adversariais.** 423 testes offline passam. Os 6 testes com internet real
 > (`pytest -m network`) passam, exceto que o ddgs (serviço externo, instável) pode devolver "sem
 > resultados" para consultas com `site:`; nesse caso o teste é pulado, não falha.
 
@@ -46,6 +46,32 @@ Respostas trazem `request_id` e `response_time`. Erros: `{"error": {"code", "mes
 
 Diferenças em relação ao Tavily: **sem `answer`** (não há LLM aqui; `include_answer=true` retorna 400);
 o `score` vem de BM25 local, não do ranking do Tavily; o `crawl` não tem `instructions`.
+
+## Busca semântica (opcional)
+
+O BM25 só enxerga palavras: não acha "automóvel" para a consulta "carro", nem uma resposta em inglês para
+uma pergunta em português. Com `SEMANTIC_ENABLED=true` (e `pip install -e ".[semantic]"`), os trechos também
+são comparados por **significado**, com embeddings locais (sem API paga) e o ranking vira **híbrido**.
+
+- Modelo padrão: `minishlab/potion-multilingual-128M` (português e inglês, embeddings estáticos). A 1ª subida
+  baixa ~0,5 GB; o modelo é aquecido em segundo plano e `GET /v1/health` informa `semantic`:
+  `disabled`, `loading`, `ready` ou `failed`.
+- Por requisição: `"ranking": "bm25" | "semantic" | "hybrid"` em `/v1/search` e `/v1/extract` (com `query`).
+  A resposta informa o modo usado em `ranking`.
+- **Nunca derruba a busca:** se o modelo não carregou, demorou (>8 s) ou deu erro, volta para BM25 e explica em `warnings`.
+- Qualidade medida em 30 consultas reais (páginas da Wikipedia e da doc do Python; parafraseadas, literais e entre
+  idiomas): acertou o trecho certo em 1º lugar 18/30 com BM25 e 20/30 no híbrido (top 3: 22/30 → 27/30). É uma amostra
+  pequena: indício, não prova. Ganho maior em consultas entre idiomas e com sinônimos; consultas literais empatam.
+- Mais preciso e bem mais lento: `SEMANTIC_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`
+  (22/30 em 1º, ~160 ms por trecho nesta CPU contra ~0,2 ms). Com ele, prefira `"ranking": "semantic"`: misturar BM25 piorou o top 3.
+
+## Estabilidade da busca
+
+O ddgs (gratuito) às vezes responde "sem resultados" para uma consulta que acabou de funcionar, e quase sempre
+falha com `site:` + português. Tratamento: reveza mecanismos (`auto` → `duckduckgo` → `auto`); se `include_domains`
+deixar vazio, refaz com o domínio como palavra comum e filtra depois (`warnings` avisa); cache de 10 min por consulta;
+teto de 30 s na etapa de busca (502 se estourar). Em 20 buscas reais que antes falhavam: 19 deram resultado.
+Quando mesmo assim vier vazio, a resposta traz `warnings` explicando.
 
 ## Como funciona
 
