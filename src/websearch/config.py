@@ -33,6 +33,7 @@ class FetchSettings:
     max_redirects: int = 3
     concurrency: int = 5
     user_agent: str = "Mozilla/5.0 (compatible; WebSearchBot/0.1)"
+    ca_bundle: str | None = None      # arquivo PEM de CAs confiáveis (proxy com inspeção TLS); None = padrão
 
 
 @dataclass(frozen=True)
@@ -112,7 +113,10 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         max_redirects=_number(env, "FETCH_MAX_REDIRECTS", 3, int, problems, minimum=0, maximum=10),
         concurrency=_number(env, "FETCH_CONCURRENCY", 5, int, problems, maximum=50),
         user_agent=_get(env, "FETCH_USER_AGENT") or FetchSettings.user_agent,
+        ca_bundle=_get(env, "FETCH_CA_BUNDLE") or None,
     )
+    if fetch.ca_bundle and not os.path.isfile(fetch.ca_bundle):
+        problems.append("FETCH_CA_BUNDLE deve apontar para um arquivo existente.")
 
     # --- servidor ----------------------------------------------------------------
     host = _get(env, "HOST") or "127.0.0.1"

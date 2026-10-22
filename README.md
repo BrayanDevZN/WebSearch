@@ -4,9 +4,10 @@ Camada de busca na web com contrato equivalente ao do Tavily (`search`, `extract
 feita só com componentes gratuitos (ddgs/DuckDuckGo, SearXNG opcional). Pensada para ser a ferramenta
 de pesquisa de um agente de IA, que ainda **não** faz parte deste repositório.
 
-> **Status: etapas 1–11 do [plano](docs/WEB_SEARCH_PLAN.md) concluídas.** 290 testes offline passam.
-> Os testes com rede real (`pytest -m network`) foram escritos mas **não** passaram no ambiente de
-> desenvolvimento (saída só por proxy); rode-os numa máquina com internet direta antes de usar.
+> **Status: etapas 1–11 do [plano](docs/WEB_SEARCH_PLAN.md) concluídas e revisadas etapa por etapa
+> com casos adversariais.** 361 testes offline passam. Os 6 testes com internet real
+> (`pytest -m network`) passam, exceto que o ddgs (serviço externo, instável) pode devolver "sem
+> resultados" para consultas com `site:`; nesse caso o teste é pulado, não falha.
 
 Referência de contrato: [`TAVILY_ARCHITECTURE.md`](TAVILY_ARCHITECTURE.md).
 
@@ -18,6 +19,9 @@ cp .env.example .env     # preencha API_SEARCH_KEY
 python -m websearch      # sobe em http://127.0.0.1:8000
 pytest                   # testes offline; `pytest -m network` usa a internet
 ```
+
+Atrás de um proxy com inspeção TLS (rede corporativa), aponte `FETCH_CA_BUNDLE` (ou `SSL_CERT_FILE`) para
+o PEM das CAs confiáveis; sem isso, o download de páginas falha com `connect`.
 
 Todas as rotas (exceto `/v1/health`) exigem `Authorization: Bearer <API_SEARCH_KEY>` ou `X-API-Key`.
 
@@ -38,7 +42,7 @@ curl -s localhost:8000/v1/search -H "Authorization: Bearer $API_SEARCH_KEY" \
 | `GET /v1/health` | Sem autenticação. |
 
 Respostas trazem `request_id` e `response_time`. Erros: `{"error": {"code", "message"}, "request_id"}` —
-400/422 parâmetros inválidos, 401 chave, 413 corpo grande, 429 limite (`Retry-After`), 502 nenhum provedor de busca respondeu.
+400/422 parâmetros inválidos (tipos estritos: `"5"` não vale como inteiro), 401 chave, 404/405 rota, 413 corpo grande (inclusive sem `Content-Length`), 429 limite (`Retry-After`), 502 nenhum provedor de busca respondeu.
 
 Diferenças em relação ao Tavily: **sem `answer`** (não há LLM aqui; `include_answer=true` retorna 400);
 o `score` vem de BM25 local, não do ranking do Tavily; o `crawl` não tem `instructions`.
@@ -62,7 +66,8 @@ Código em `src/websearch/`: `config.py` (.env), `net/` (validação de URL e fe
   requisição (64 KB) e requisições por minuto.
 - **Chave:** comparação em tempo constante; nunca aparece em log, erro ou `repr`. Docs/OpenAPI desligados.
   Requisições sem chave não consomem o limite de taxa.
-- **robots.txt** respeitado no `map`/`crawl`.
+- **robots.txt** respeitado no `map`/`crawl` (interpretador próprio: `*`, `$`, regra mais longa vence — igual em qualquer versão do Python).
+- Chave, limite de taxa e tamanho do corpo são checados num middleware **antes** de ler/validar o corpo (sem chave: sempre 401).
 - **Limitação conhecida:** regex de `select_paths` etc. vêm do cliente autenticado; têm tamanho máximo
   mas não proteção contra regex patológicas (ReDoS). Use só com clientes confiáveis.
 - O limite de taxa é por processo (memória) e único para a chave; HTTPS/TLS fica a cargo de um proxy reverso.

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import re
 from datetime import datetime
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from websearch.search.base import SearchHit, SearchProviderError, SearchQuery
 from websearch.search.filters import valid_domain
@@ -59,9 +59,22 @@ def text_of(value: Any) -> str:
 class DDGSProvider:
     name = "ddgs"
 
-    def __init__(self, search_fn: SearchFn | None = None, *, overfetch: int = 2):
+    def __init__(
+        self,
+        search_fn: SearchFn | None = None,
+        *,
+        overfetch: int = 2,
+        empty_retries: int = 1,
+        retry_delay: float = 0.7,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ):
         self._search = search_fn or _default_search
         self._overfetch = max(1, overfetch)
+        # O ddgs às vezes responde "sem resultados" para uma consulta que acabou de funcionar
+        # (bloqueio/limite silencioso dos mecanismos); uma segunda tentativa costuma resolver.
+        self._empty_retries = max(0, empty_retries)
+        self._retry_delay = retry_delay
+        self._sleep = sleep
 
     async def search(self, query: SearchQuery) -> list[SearchHit]:
         kind = "news" if query.topic == "news" else "text"
@@ -71,13 +84,19 @@ class DDGSProvider:
         if query.region:
             kwargs["region"] = query.region
         text = build_query_text(query)
-        try:
-            rows = await asyncio.to_thread(self._search, kind, text, **kwargs)
-        except Exception as exc:  # a biblioteca levanta tipos próprios; classificamos pelo nome
-            error = self._classify(exc)
-            if isinstance(error, _NoResults):
-                return []
-            raise error from None
+        rows: Any = []
+        for attempt in range(self._empty_retries + 1):
+            try:
+                rows = await asyncio.to_thread(self._search, kind, text, **kwargs)
+            except Exception as exc:  # a biblioteca levanta tipos próprios; classificamos pelo nome
+                error = self._classify(exc)
+                if not isinstance(error, _NoResults):
+                    raise error from None
+                rows = []
+            if rows:
+                break
+            if attempt < self._empty_retries:
+                await self._sleep(self._retry_delay)
         return [hit for i, row in enumerate(rows if isinstance(rows, list) else []) if (hit := self._to_hit(row, i, kind))]
 
     def _classify(self, exc: Exception) -> Exception:

@@ -90,3 +90,12 @@ def test_provedores_duplicados_sao_unificados(base_env):
 def test_searxng_url_invalida(base_env, url):
     base_env.update(SEARCH_PROVIDERS="searxng", SEARXNG_URL=url)
     assert any("SEARXNG_URL" in p for p in problems(base_env))
+
+
+def test_ca_bundle_precisa_existir(base_env, tmp_path):
+    base_env["FETCH_CA_BUNDLE"] = str(tmp_path / "nao-existe.pem")
+    assert any("FETCH_CA_BUNDLE" in p for p in problems(base_env))
+    arquivo = tmp_path / "ca.pem"
+    arquivo.write_text("x")
+    base_env["FETCH_CA_BUNDLE"] = str(arquivo)
+    assert load_settings(base_env).fetch.ca_bundle == str(arquivo)

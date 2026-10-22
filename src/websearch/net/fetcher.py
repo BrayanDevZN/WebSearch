@@ -12,7 +12,9 @@ Garantias:
 from __future__ import annotations
 
 import asyncio
+import os
 import re
+import ssl
 import time
 from dataclasses import dataclass, field
 from urllib.parse import urljoin, urlsplit
@@ -84,6 +86,18 @@ def decode_body(body: bytes, content_type_header: str | None) -> str:
     return body.decode("cp1252", errors="replace")
 
 
+def _tls_verify(ca_bundle: str | None):
+    """CA própria (FETCH_CA_BUNDLE ou SSL_CERT_FILE, o padrão do OpenSSL); senão, os certificados do certifi."""
+    path = ca_bundle or os.environ.get("SSL_CERT_FILE") or ""
+    if path and os.path.isfile(path):
+        try:
+            return ssl.create_default_context(cafile=path)
+        except (ssl.SSLError, OSError):
+            if ca_bundle:
+                raise
+    return True
+
+
 def _ip_netloc(ip: str, port: int, default_port: int) -> str:
     host = f"[{ip}]" if ":" in ip else ip
     return host if port == default_port else f"{host}:{port}"
@@ -106,6 +120,7 @@ class Fetcher:
         self._sem = asyncio.Semaphore(self.settings.concurrency)
         self._client = httpx.AsyncClient(
             transport=transport,
+            verify=_tls_verify(self.settings.ca_bundle),
             follow_redirects=False,
             trust_env=False,
             timeout=httpx.Timeout(self.settings.timeout_seconds),

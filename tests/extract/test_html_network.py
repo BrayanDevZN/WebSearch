@@ -6,7 +6,7 @@ from websearch.net.fetcher import Fetcher
 pytestmark = pytest.mark.network
 
 
-async def test_pagina_real_wikipedia():
+async def test_pagina_real_wikipedia(direct_egress):
     async with Fetcher() as f:
         r = await f.fetch("https://en.wikipedia.org/wiki/Web_search_engine")
     p = extract_from_fetch(r)

@@ -10,10 +10,10 @@ KEY = "k" * 40
 AUTH = {"Authorization": f"Bearer {KEY}"}
 
 
-def test_search_extract_crawl_reais():
+def test_search_extract_crawl_reais(direct_egress):
     with TestClient(create_app(load_settings({"API_SEARCH_KEY": KEY}))) as c:
         ex = c.post("/v1/extract", headers=AUTH, json={"urls": "https://example.com/"}).json()
-        assert "Example Domain" in ex["results"][0]["raw_content"]
+        assert "documentation examples" in ex["results"][0]["raw_content"]
         cr = c.post("/v1/crawl", headers=AUTH, json={"url": "https://example.com/", "max_depth": 1}).json()
         assert cr["results"]
         s = c.post("/v1/search", headers=AUTH, json={

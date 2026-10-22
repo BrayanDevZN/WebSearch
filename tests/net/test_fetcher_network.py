@@ -6,7 +6,7 @@ from websearch.net.fetcher import FetchError, Fetcher
 pytestmark = pytest.mark.network
 
 
-async def test_https_real_com_pin_de_ip_valida_certificado():
+async def test_https_real_com_pin_de_ip_valida_certificado(direct_egress):
     async with Fetcher() as f:
         r = await f.fetch("https://example.com/")
     assert r.status == 200 and "Example Domain" in r.text

@@ -33,7 +33,7 @@ TEXT_ROWS = [
 
 async def test_ddgs_mapeia_resultados_e_extrai_data_do_texto():
     fn = fake(TEXT_ROWS)
-    hits = await DDGSProvider(fn).search(SearchQuery("linux 7.1", max_results=5))
+    hits = await DDGSProvider(retry_delay=0, search_fn=fn).search(SearchQuery("linux 7.1", max_results=5))
     assert [h.url for h in hits] == ["https://a.com/1", "https://b.com/2"]
     assert hits[0].published_date == "2026-06-15" and hits[0].snippet == "Linus Torvalds lançou o 7.1"
     assert hits[1].published_date is None and hits[1].provider == "ddgs"
@@ -44,7 +44,7 @@ async def test_ddgs_mapeia_resultados_e_extrai_data_do_texto():
 async def test_ddgs_noticias_usam_news_e_data_do_campo():
     rows = [{"title": "N", "url": "https://n.com/1", "body": "corpo", "date": "2026-10-16T10:30:00+00:00"}]
     fn = fake(rows)
-    hits = await DDGSProvider(fn).search(SearchQuery("kernel", topic="news", time_range="week"))
+    hits = await DDGSProvider(retry_delay=0, search_fn=fn).search(SearchQuery("kernel", topic="news", time_range="week"))
     assert fn.calls[0][0] == "news" and fn.calls[0][2]["timelimit"] == "w"
     assert hits[0].published_date == "2026-10-16T10:30:00+00:00"
 
@@ -52,13 +52,13 @@ async def test_ddgs_noticias_usam_news_e_data_do_campo():
 @pytest.mark.parametrize("rng,code", [("day", "d"), ("week", "w"), ("month", "m"), ("year", "y")])
 async def test_ddgs_time_range(rng, code):
     fn = fake([])
-    await DDGSProvider(fn).search(SearchQuery("q", time_range=rng))
+    await DDGSProvider(retry_delay=0, search_fn=fn).search(SearchQuery("q", time_range=rng))
     assert fn.calls[0][2]["timelimit"] == code
 
 
 async def test_ddgs_regiao_e_sem_timelimit_por_padrao():
     fn = fake([])
-    await DDGSProvider(fn).search(SearchQuery("q", region="br-pt"))
+    await DDGSProvider(retry_delay=0, search_fn=fn).search(SearchQuery("q", region="br-pt"))
     assert fn.calls[0][2]["region"] == "br-pt" and "timelimit" not in fn.calls[0][2]
 
 
@@ -77,17 +77,17 @@ def test_operadores_de_dominio_na_consulta():
 ])
 async def test_ddgs_classifica_erros(exc, rate, retry):
     with pytest.raises(SearchProviderError) as e:
-        await DDGSProvider(fake(exc=exc)).search(SearchQuery("q"))
+        await DDGSProvider(retry_delay=0, search_fn=fake(exc=exc)).search(SearchQuery("q"))
     assert e.value.rate_limited is rate and e.value.retryable is retry and e.value.provider == "ddgs"
 
 
 async def test_ddgs_no_results_nao_e_erro():
-    assert await DDGSProvider(fake(exc=DDGSException("No results found."))).search(SearchQuery("q")) == []
+    assert await DDGSProvider(retry_delay=0, search_fn=fake(exc=DDGSException("No results found."))).search(SearchQuery("q")) == []
 
 
 async def test_ddgs_resposta_vazia_ou_none():
-    assert await DDGSProvider(fake([])).search(SearchQuery("q")) == []
-    assert await DDGSProvider(fake(None)).search(SearchQuery("q")) == []
+    assert await DDGSProvider(retry_delay=0, search_fn=fake([])).search(SearchQuery("q")) == []
+    assert await DDGSProvider(retry_delay=0, search_fn=fake(None)).search(SearchQuery("q")) == []
 
 
 # ---------------------------- SearXNG --------------------------------------------------
@@ -148,10 +148,10 @@ async def test_ddgs_ignora_linhas_e_campos_nao_textuais():
     import asyncio  # noqa: F401
     rows = [{"href": "http://a.com", "title": None, "body": 5}, {"href": ["x"]}, None, "texto",
             {"url": "http://u.com", "title": "t", "body": "Jun 15, 2026 · oi"}]
-    hits = await DDGSProvider(search_fn=lambda k, q, **kw: rows).search(SearchQuery("q"))
+    hits = await DDGSProvider(retry_delay=0, search_fn=lambda k, q, **kw: rows).search(SearchQuery("q"))
     assert [h.url for h in hits] == ["http://a.com", "http://u.com"]
     assert hits[0].title == "" and hits[0].snippet == "" and hits[1].published_date == "2026-06-15"
-    assert await DDGSProvider(search_fn=lambda k, q, **kw: "string").search(SearchQuery("q")) == []
+    assert await DDGSProvider(retry_delay=0, search_fn=lambda k, q, **kw: "string").search(SearchQuery("q")) == []
 
 
 @pytest.mark.parametrize("payload", [
@@ -162,3 +162,55 @@ async def test_searxng_resiste_a_json_estranho(payload):
     transport = httpx.MockTransport(lambda r: httpx.Response(200, json=payload))
     hits = await SearXNGProvider("http://s", transport=transport).search(SearchQuery("q"))
     assert [h.url for h in hits] == ["http://a.com"] and hits[0].snippet == "" and hits[0].published_date is None
+
+
+class _NoResultsError(Exception):
+    pass
+
+
+_NoResultsError.__name__ = "DDGSException"
+
+
+async def test_ddgs_tenta_de_novo_quando_vem_vazio_uma_vez():
+    calls, sleeps = [], []
+
+    def fn(kind, text, **kw):
+        calls.append(text)
+        if len(calls) == 1:
+            raise _NoResultsError("No results found.")
+        return [{"href": "http://a.com", "title": "t", "body": "b"}]
+
+    async def sleep(seconds):
+        sleeps.append(seconds)
+
+    hits = await DDGSProvider(retry_delay=0, search_fn=fn, sleep=sleep).search(SearchQuery("q"))
+    assert [h.url for h in hits] == ["http://a.com"] and len(calls) == 2 and len(sleeps) == 1
+
+
+async def test_ddgs_vazio_de_verdade_desiste_depois_da_nova_tentativa():
+    calls = []
+
+    def fn(kind, text, **kw):
+        calls.append(1)
+        return []
+
+    async def sleep(_):
+        return None
+
+    assert await DDGSProvider(retry_delay=0, search_fn=fn, sleep=sleep).search(SearchQuery("q")) == []
+    assert len(calls) == 2
+    calls.clear()
+    assert await DDGSProvider(retry_delay=0, search_fn=fn, sleep=sleep, empty_retries=0).search(SearchQuery("q")) == []
+    assert len(calls) == 1
+
+
+async def test_ddgs_erro_real_nao_e_repetido_pelo_provedor():
+    calls = []
+
+    def fn(kind, text, **kw):
+        calls.append(1)
+        raise TimeoutError("lento")
+
+    with pytest.raises(SearchProviderError):
+        await DDGSProvider(retry_delay=0, search_fn=fn).search(SearchQuery("q"))
+    assert len(calls) == 1
