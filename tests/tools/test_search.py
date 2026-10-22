@@ -160,3 +160,60 @@ async def test_busca_lenta_estoura_o_teto_e_vira_indisponivel():
     with pytest.raises(SearchUnavailable) as e:
         await tool.search(SearchRequest("x"))
     assert "tempo limite" in str(e.value)
+
+
+# ------------------------------------------------------------------ ranking semântico --
+np = pytest.importorskip("numpy")
+from tests.fakes import FakeEmbedder  # noqa: E402
+from websearch.rank.hybrid import Ranker  # noqa: E402
+from websearch.rank.semantic import SemanticUnavailable  # noqa: E402
+
+
+def make_sem(hits, fetcher=None, embedder=None, **kw):
+    ranker = Ranker(embedder or FakeEmbedder())
+    return SearchTool(SearchRouter([FakeProvider(hits)]), fetcher or FakeFetcher(), ranker=ranker,
+                      request_id=lambda: "rid", **kw)
+
+
+async def test_snippet_semantico_ordena_sinonimo_acima_de_palavra_enganosa():
+    hits = [hit(0, snippet="bolo receita doce"), hit(1, snippet="automovel veiculo barato"), hit(2, snippet="nada a ver")]
+    resp = await make_sem(hits).search(SearchRequest("carro", search_depth="fast"))
+    assert resp.results[0]["url"] == "https://s1.com/a" and resp.ranking == "hybrid"
+    assert resp.to_dict()["ranking"] == "hybrid"
+
+
+async def test_bm25_nao_acha_o_sinonimo_mas_o_hibrido_sim():
+    pages = ["Texto geral sobre assuntos variados. " * 20, "O automovel veiculo mais economico da cidade. " * 6]
+    hits = [hit(0), hit(1)]
+    fetcher = lambda: FakeFetcher({h.url: page_html(f"P{i}", [pages[i]]) for i, h in enumerate(hits)})
+    sem = await make_sem(hits, fetcher()).search(SearchRequest("carro", search_depth="advanced", chunks_per_source=1))
+    bm = await make_sem(hits, fetcher()).search(SearchRequest("carro", search_depth="advanced", ranking="bm25"))
+    assert sem.results[0]["url"] == "https://s1.com/a" and "automovel" in sem.results[0]["content"]
+    assert bm.ranking == "bm25" and bm.results[0]["url"] == "https://s0.com/a"          # sem a palavra, BM25 empata
+
+
+async def test_modelo_fora_do_ar_cai_para_bm25_e_avisa_sem_derrubar_a_busca():
+    class Down(FakeEmbedder):
+        async def embed(self, texts):
+            raise SemanticUnavailable("fora")
+
+    resp = await make_sem([hit(0, snippet="carro")], embedder=Down()).search(SearchRequest("carro", search_depth="fast"))
+    assert resp.results and resp.ranking == "bm25" and any("indisponível" in w for w in resp.warnings)
+
+
+async def test_pedido_explicito_sem_semantico_ligado_avisa():
+    resp = await make([hit(0)]).search(SearchRequest("x", search_depth="fast", ranking="hybrid"))
+    assert resp.ranking == "bm25" and "desligada" in resp.warnings[0]
+    silent = await make([hit(0)]).search(SearchRequest("x", search_depth="fast"))
+    assert "warnings" not in silent.to_dict()                                          # padrão não incomoda
+
+
+async def test_ranking_invalido():
+    with pytest.raises(InvalidRequest):
+        await make([hit(0)]).search(SearchRequest("x", ranking="magico"))
+
+
+async def test_ranking_bm25_explicito_nao_toca_no_modelo():
+    emb = FakeEmbedder()
+    await make_sem([hit(0)], embedder=emb).search(SearchRequest("carro", search_depth="fast", ranking="bm25"))
+    assert emb.calls == []

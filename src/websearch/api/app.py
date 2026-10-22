@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import logging
 import time
@@ -18,6 +19,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from websearch import __version__
 from websearch.config import Settings
 from websearch.net.fetcher import Fetcher
+from websearch.rank.factory import build_ranker
+from websearch.rank.hybrid import Ranker
 from websearch.search.factory import build_router
 from websearch.search.router import SearchRouter
 from websearch.tools.common import InvalidRequest, PageFetcher, SearchUnavailable, new_request_id
@@ -56,6 +59,7 @@ class SearchBody(Body):
     include_favicon: bool = False
     include_answer: bool = False
     region: str | None = None
+    ranking: Literal["bm25", "semantic", "hybrid"] | None = None
 
 
 class ExtractBody(Body):
@@ -66,6 +70,7 @@ class ExtractBody(Body):
     format: Literal["markdown", "text"] = "markdown"
     include_images: bool = False
     include_favicon: bool = False
+    ranking: Literal["bm25", "semantic", "hybrid"] | None = None
 
 
 class MapBody(Body):
@@ -117,12 +122,14 @@ def create_app(
     *,
     router: SearchRouter | None = None,
     fetcher: PageFetcher | None = None,
+    ranker: Ranker | None = None,
     clock: Callable[[], float] = time.monotonic,
 ) -> FastAPI:
     own_fetcher = fetcher is None
     page_fetcher: PageFetcher = fetcher or Fetcher(settings.fetch)
-    search_tool = SearchTool(router or build_router(settings), page_fetcher)
-    extract_tool = ExtractTool(page_fetcher)
+    ranker = ranker or build_ranker(settings)
+    search_tool = SearchTool(router or build_router(settings), page_fetcher, ranker=ranker)
+    extract_tool = ExtractTool(page_fetcher, ranker=ranker)
     map_tool = MapTool(page_fetcher)
     crawl_tool = CrawlTool(page_fetcher)
     limiter = RateLimiter(settings.rate_limit_per_minute, clock)
@@ -130,7 +137,19 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
+        warmup = None
+        embedder = ranker.embedder
+        if embedder is not None and hasattr(embedder, "warmup"):
+            async def _warm():                     # baixa/carrega o modelo sem atrasar a subida do servidor
+                try:
+                    await embedder.warmup()
+                except Exception as exc:
+                    log.warning("modelo semântico indisponível (%s); usando BM25.", type(exc).__name__)
+
+            warmup = asyncio.create_task(_warm())
         yield
+        if warmup is not None:
+            warmup.cancel()
         if own_fetcher:
             await page_fetcher.aclose()  # type: ignore[attr-defined]
 
@@ -163,7 +182,9 @@ def create_app(
 
     @app.get("/v1/health")
     async def health():
-        return {"status": "ok", "version": __version__}
+        embedder = ranker.embedder
+        semantic = "disabled" if embedder is None else getattr(embedder, "state", "ready")
+        return {"status": "ok", "version": __version__, "semantic": semantic}
 
     @app.post("/v1/search")
     async def search(body: SearchBody):

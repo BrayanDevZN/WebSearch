@@ -174,3 +174,71 @@ def test_cabecalhos_de_seguranca_e_corpo_pequeno_no_chunked():
     ok = c.post("/v1/search", headers={**AUTH, "Content-Type": "application/json"},
                 content=iter([b'{"query":', b'"x"}']))
     assert ok.status_code == 200
+
+
+# ------------------------------------------------------------------ semântico --
+np = pytest.importorskip("numpy")
+from tests.fakes import FakeEmbedder  # noqa: E402
+from websearch.config import ConfigError  # noqa: E402
+from websearch.rank.hybrid import Ranker  # noqa: E402
+
+
+def make_sem_client(embedder=None, snippet="automovel veiculo barato"):
+    settings = load_settings({"API_SEARCH_KEY": KEY})
+    provider = FakeProvider([SearchHit("T", URL, snippet, "fake", 0)])
+    app = create_app(settings, router=SearchRouter([provider]), fetcher=FakeFetcher({URL: page_html("P", [BODY])}),
+                     ranker=Ranker(embedder or FakeEmbedder()))
+    return TestClient(app, raise_server_exceptions=False)
+
+
+def test_health_informa_estado_do_semantico():
+    assert make_client().get("/v1/health").json()["semantic"] == "disabled"
+    assert make_sem_client().get("/v1/health").json()["semantic"] == "ready"      # embedder sem .state = pronto
+
+
+def test_search_ranking_no_corpo_e_na_resposta():
+    c = make_sem_client()
+    r = c.post("/v1/search", headers=AUTH, json={"query": "carro", "search_depth": "fast"})
+    assert r.status_code == 200 and r.json()["ranking"] == "hybrid"
+    r = c.post("/v1/search", headers=AUTH, json={"query": "carro", "search_depth": "fast", "ranking": "bm25"})
+    assert r.json()["ranking"] == "bm25"
+    r = c.post("/v1/search", headers=AUTH, json={"query": "x", "ranking": "magico"})
+    assert r.status_code == 422
+    r = make_client().post("/v1/search", headers=AUTH, json={"query": "x", "search_depth": "fast", "ranking": "semantic"})
+    assert r.status_code == 200 and r.json()["ranking"] == "bm25" and "desligada" in r.json()["warnings"][0]
+
+
+def test_extract_ranking_no_corpo():
+    c = make_sem_client()
+    r = c.post("/v1/extract", headers=AUTH, json={"urls": URL, "query": "carro", "ranking": "semantic"})
+    assert r.status_code == 200 and r.json()["results"]
+    assert c.post("/v1/extract", headers=AUTH, json={"urls": URL, "ranking": "x"}).status_code == 422
+
+
+def test_semantic_enabled_sem_dependencia_falha_com_mensagem_clara(monkeypatch):
+    import sys
+
+    monkeypatch.setitem(sys.modules, "fastembed", None)
+    settings = load_settings({"API_SEARCH_KEY": KEY, "SEMANTIC_ENABLED": "true"})
+    with pytest.raises(ConfigError) as e:
+        create_app(settings, router=SearchRouter([FakeProvider([])]), fetcher=FakeFetcher())
+    assert "websearch[semantic]" in str(e.value)
+
+
+def test_lifespan_aquece_o_modelo_sem_bloquear_e_tolera_falha():
+    class Warmable(FakeEmbedder):
+        warmed = False
+
+        async def warmup(self):
+            Warmable.warmed = True
+
+    with make_sem_client(Warmable()) as c:
+        assert c.get("/v1/health").status_code == 200
+    assert Warmable.warmed
+
+    class Broken(FakeEmbedder):
+        async def warmup(self):
+            raise RuntimeError("sem rede")
+
+    with make_sem_client(Broken()) as c:                       # a falha do aquecimento não derruba o servidor
+        assert c.post("/v1/search", headers=AUTH, json={"query": "carro", "search_depth": "fast"}).status_code == 200

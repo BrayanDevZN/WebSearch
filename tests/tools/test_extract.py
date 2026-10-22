@@ -73,3 +73,47 @@ async def test_urls_internas_vao_para_failed_com_fetcher_real():
     assert resp.results == []
     assert {f["error"] for f in resp.failed_results} <= {"unsafe_url", "private_ip", "blocked_host"}
     assert len(resp.failed_results) == 4
+
+
+# ------------------------------------------------------------------ query semântica --
+np = pytest.importorskip("numpy")
+from tests.fakes import FakeEmbedder  # noqa: E402
+from websearch.rank.hybrid import Ranker  # noqa: E402
+from websearch.rank.semantic import SemanticUnavailable  # noqa: E402
+
+SEM_BODY = [f"Assunto {i} totalmente diverso e longo. " * 10 for i in range(8)] + ["O automovel veiculo mais economico. " * 10]
+
+
+async def test_query_semantica_acha_sinonimo_sem_palavra_em_comum():
+    f = FakeFetcher({A: page_html("A", SEM_BODY)})
+    sem = await ExtractTool(f, ranker=Ranker(FakeEmbedder())).extract(ExtractRequest(A, query="carro", chunks_per_source=1))
+    assert "automovel" in sem.results[0]["raw_content"] and "warnings" not in sem.to_dict()
+    bm = await ExtractTool(f, ranker=Ranker(FakeEmbedder())).extract(
+        ExtractRequest(A, query="carro", chunks_per_source=1, ranking="bm25"))
+    assert "automovel" not in bm.results[0]["raw_content"]             # BM25 não enxerga o sinônimo
+
+
+async def test_query_semantica_modelo_fora_cai_para_bm25_com_aviso():
+    class Down(FakeEmbedder):
+        async def embed(self, texts):
+            raise SemanticUnavailable("fora")
+
+    f = FakeFetcher({A: page_html("A", BODY)})
+    resp = await ExtractTool(f, ranker=Ranker(Down())).extract(ExtractRequest(A, query="foguetes", chunks_per_source=1))
+    assert "Foguetes" in resp.results[0]["raw_content"] and "indisponível" in resp.warnings[0]
+
+
+async def test_ranking_sem_query_nao_chama_modelo_e_invalido_e_rejeitado():
+    emb = FakeEmbedder()
+    f = FakeFetcher({A: page_html("A", BODY)})
+    await ExtractTool(f, ranker=Ranker(emb)).extract(ExtractRequest(A))
+    assert emb.calls == []
+    with pytest.raises(InvalidRequest):
+        await ExtractTool(f).extract(ExtractRequest(A, ranking="magico"))
+
+
+async def test_varias_urls_pontuadas_num_unico_lote_semantico():
+    emb = FakeEmbedder()
+    f = FakeFetcher({A: page_html("A", BODY), B: page_html("B", BODY)})
+    await ExtractTool(f, ranker=Ranker(emb)).extract(ExtractRequest([A, B], query="foguetes"))
+    assert len(emb.calls) == 1

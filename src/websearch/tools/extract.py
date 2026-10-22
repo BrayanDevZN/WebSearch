@@ -9,6 +9,7 @@ from typing import Callable, Literal, Sequence
 
 from websearch.extract.chunk import split_chunks
 from websearch.net.urlsafe import UnsafeURLError, normalize_url
+from websearch.rank.hybrid import MODES, Ranker
 from websearch.rank.select import join_chunks, select_chunks
 from websearch.tools.common import InvalidRequest, PageFetcher, PageOutcome, load_page, new_request_id
 
@@ -33,6 +34,7 @@ class ExtractRequest:
     format: Literal["markdown", "text"] = "markdown"
     include_images: bool = False
     include_favicon: bool = False
+    ranking: str | None = None                 # bm25 | semantic | hybrid (só vale com `query`)
 
     def url_list(self) -> list[str]:
         return [self.urls] if isinstance(self.urls, str) else list(self.urls)
@@ -49,6 +51,8 @@ class ExtractRequest:
             raise InvalidRequest("extract_depth deve ser 'basic' ou 'advanced'.")
         if self.format not in ("markdown", "text"):
             raise InvalidRequest("format deve ser 'markdown' ou 'text'.")
+        if self.ranking is not None and self.ranking not in MODES:
+            raise InvalidRequest(f"ranking deve ser um de: {', '.join(MODES)}.")
         if self.query is not None and len(self.query) > 400:
             raise InvalidRequest("query deve ter no máximo 400 caracteres.")
 
@@ -59,10 +63,14 @@ class ExtractResponse:
     failed_results: list[dict]
     response_time: float
     request_id: str
+    warnings: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
-        return {"results": self.results, "failed_results": self.failed_results,
-                "response_time": self.response_time, "request_id": self.request_id}
+        out = {"results": self.results, "failed_results": self.failed_results,
+               "response_time": self.response_time, "request_id": self.request_id}
+        if self.warnings:
+            out["warnings"] = self.warnings
+        return out
 
 
 class ExtractTool:
@@ -70,11 +78,13 @@ class ExtractTool:
         self,
         fetcher: PageFetcher,
         *,
+        ranker: Ranker | None = None,
         budget_seconds: float = DEFAULT_BUDGET_SECONDS,
         clock: Callable[[], float] = time.monotonic,
         request_id: Callable[[], str] = new_request_id,
     ):
         self._fetcher = fetcher
+        self._ranker = ranker or Ranker()
         self._budget = budget_seconds
         self._clock = clock
         self._request_id = request_id
@@ -103,25 +113,37 @@ class ExtractTool:
             _, pending = await asyncio.wait(tasks, timeout=self._budget)
             for task in pending:
                 task.cancel()
+        loaded: list[tuple[int, str, PageOutcome]] = []
         for (index, url), task in zip(slots, tasks):
             ok = task.done() and not task.cancelled() and task.exception() is None
             outcome = task.result() if ok else PageOutcome(error="timeout")
             if outcome.error or outcome.page is None:
                 failed.append({"url": url, "error": outcome.error or "fetch_failed"})
             else:
-                results[index] = self._item(request, url, outcome)
+                loaded.append((index, url, outcome))
+
+        warnings: list[str] = []
+        chunk_lists: list[list[str]] = [[] for _ in loaded]
+        scores: list[list[float]] = [[] for _ in loaded]
+        if loaded and request.query and request.query.strip():
+            chunk_lists = [split_chunks(outcome.page.text) for _, _, outcome in loaded]
+            ranked = await self._ranker.score_pages(request.query, chunk_lists, request.ranking)
+            scores = ranked.scores
+            if ranked.warning:
+                warnings.append(ranked.warning)
+        for (index, url, outcome), chunks, chunk_scores in zip(loaded, chunk_lists, scores):
+            results[index] = self._item(request, url, outcome, chunks, chunk_scores)
         return ExtractResponse(
-            results=[r for r in results if r is not None], failed_results=failed,
+            results=[r for r in results if r is not None], failed_results=failed, warnings=warnings,
             response_time=round(self._clock() - started, 2), request_id=self._request_id(),
         )
 
     @staticmethod
-    def _item(request: ExtractRequest, url: str, outcome: PageOutcome) -> dict:
+    def _item(request: ExtractRequest, url: str, outcome: PageOutcome, chunks: list[str], scores: list[float]) -> dict:
         page = outcome.page
         text = page.text
-        if request.query and request.query.strip():
-            chunks = split_chunks(text)
-            text = join_chunks(select_chunks(request.query, chunks, request.chunks_per_source)) or text
+        if chunks:
+            text = join_chunks(select_chunks(request.query, chunks, request.chunks_per_source, scores)) or text
         item: dict = {"url": page.url or url, "title": page.title, "raw_content": text}
         if page.published_date:
             item["published_date"] = page.published_date

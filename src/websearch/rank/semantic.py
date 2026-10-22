@@ -54,6 +54,7 @@ class FastEmbedder:
         self._cache_dir = cache_dir or DEFAULT_CACHE_DIR
         self._threads = threads
         self._model: Any = None
+        self._failed = False
         self._load_lock = threading.Lock()          # a carga roda em thread; só uma de cada vez
         self._cache: OrderedDict[str, Any] = OrderedDict()
         self._cache_size = max(0, cache_size)
@@ -72,8 +73,15 @@ class FastEmbedder:
                     os.makedirs(self._cache_dir, exist_ok=True)
                     self._model = TextEmbedding(self.name, cache_dir=self._cache_dir, threads=self._threads)
                 except Exception as exc:
+                    self._failed = True
                     raise SemanticUnavailable(f"não foi possível carregar o modelo {self.name} ({type(exc).__name__}).") from None
+                self._failed = False
             return self._model
+
+    @property
+    def state(self) -> str:
+        """ready = modelo na memória; failed = última carga falhou; loading = ainda não carregado."""
+        return "ready" if self._model is not None else ("failed" if self._failed else "loading")
 
     async def warmup(self) -> None:
         """Carrega o modelo (e baixa, na primeira vez) fora do caminho de uma requisição."""

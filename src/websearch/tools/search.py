@@ -17,8 +17,8 @@ from typing import Callable, Literal, Sequence
 
 from websearch.extract.chunk import split_chunks
 from websearch.extract.html import ExtractedPage
-from websearch.rank.bm25 import BM25, normalize_scores
-from websearch.rank.select import ScoredChunk, join_chunks, score_pages, select_chunks
+from websearch.rank.hybrid import MODES, Ranker
+from websearch.rank.select import ScoredChunk, join_chunks, select_chunks
 from websearch.search.base import SearchHit, SearchQuery, TimeRange, Topic
 from websearch.search.filters import parse_date
 from websearch.search.router import SearchRouter
@@ -52,6 +52,7 @@ class SearchRequest:
     include_images: bool = False
     include_favicon: bool = False
     region: str | None = None
+    ranking: str | None = None                 # bm25 | semantic | hybrid (None = padrão do servidor)
 
     def validate(self) -> None:
         query = (self.query or "").strip()
@@ -82,6 +83,8 @@ class SearchRequest:
                     raise InvalidRequest(f"{name} deve estar no formato YYYY-MM-DD.") from None
         if self.start_date and self.end_date and self.start_date > self.end_date:
             raise InvalidRequest("start_date não pode ser depois de end_date.")
+        if self.ranking is not None and self.ranking not in MODES:
+            raise InvalidRequest(f"ranking deve ser um de: {', '.join(MODES)}.")
         if self.include_raw_content not in (True, False, "markdown", "text"):
             raise InvalidRequest("include_raw_content deve ser booleano, 'markdown' ou 'text'.")
 
@@ -113,10 +116,11 @@ class SearchResponse:
     images: list[dict] = field(default_factory=list)
     provider: str | None = None
     warnings: list[str] = field(default_factory=list)
+    ranking: str = "bm25"
 
     def to_dict(self) -> dict:
-        out = {"query": self.query, "results": self.results, "response_time": self.response_time,
-               "request_id": self.request_id}
+        out = {"query": self.query, "results": self.results, "ranking": self.ranking,
+               "response_time": self.response_time, "request_id": self.request_id}
         if self.images:
             out["images"] = self.images
         if self.warnings:
@@ -130,6 +134,7 @@ class SearchTool:
         router: SearchRouter,
         fetcher: PageFetcher,
         *,
+        ranker: Ranker | None = None,
         budget_seconds: float = DEFAULT_BUDGET_SECONDS,
         search_timeout: float = DEFAULT_SEARCH_TIMEOUT,
         clock: Callable[[], float] = time.monotonic,
@@ -137,6 +142,7 @@ class SearchTool:
     ):
         self._router = router
         self._fetcher = fetcher
+        self._ranker = ranker or Ranker()
         self._budget = budget_seconds
         self._search_timeout = search_timeout
         self._clock = clock
@@ -166,8 +172,8 @@ class SearchTool:
     async def _finish(self, request: SearchRequest, query: str, outcome, started: float) -> SearchResponse:
         hits = outcome.hits
         pages = await self._fetch_pages(request, hits)
-        results, images = self._build(request, query, hits, pages)
-        warnings: list[str] = []
+        results, images, mode, rank_warnings = await self._build(request, query, hits, pages)
+        warnings: list[str] = list(rank_warnings)
         if outcome.relaxed:
             warnings.append("O provedor não devolveu resultados com o filtro de domínio; a busca foi refeita "
                             "com o domínio como palavra e filtrada depois.")
@@ -175,7 +181,7 @@ class SearchTool:
             warnings.append("Nenhum resultado. Os provedores de busca podem estar limitando ou bloqueando; "
                             "tente de novo em instantes ou simplifique a consulta/filtros.")
         return SearchResponse(
-            query=query, results=results, images=images, provider=outcome.provider, warnings=warnings,
+            query=query, results=results, images=images, provider=outcome.provider, warnings=warnings, ranking=mode,
             response_time=round(self._clock() - started, 2), request_id=self._request_id(),
         )
 
@@ -198,25 +204,26 @@ class SearchTool:
         return outcomes + [None] * (len(hits) - count)
 
     # ---------------------------------------------------------------- results --
-    def _build(self, request, query, hits, outcomes):
+    async def _build(self, request, query, hits, outcomes):
         chunk_lists: list[list[str]] = []
         for outcome in outcomes:
             ok = outcome is not None and outcome.page is not None and outcome.error is None
             chunk_lists.append(split_chunks(outcome.page.text) if ok else [])
-        all_scores = score_pages(query, chunk_lists)
+        ranked = await self._ranker.score_pages(query, chunk_lists, request.ranking)
+        warnings = [ranked.warning] if ranked.warning else []
 
         results: list[dict] = []
-        raw_scores: list[float] = []
-        for hit, outcome, chunks, scores in zip(hits, outcomes, chunk_lists, all_scores):
+        page_scores: list[float | None] = []
+        for hit, outcome, chunks, scores in zip(hits, outcomes, chunk_lists, ranked.scores):
             page: ExtractedPage | None = outcome.page if outcome and not outcome.error else None
             selected: list[ScoredChunk] = []
             if chunks:
                 selected = select_chunks(query, chunks, request.chunk_count(), scores)
                 content = join_chunks(selected)
-                raw_scores.append(max(scores, default=0.0))
+                page_scores.append(max(scores, default=0.0))
             else:
                 content = hit.snippet
-                raw_scores.append(-1.0)             # marcador: pontuar pelo snippet depois
+                page_scores.append(None)            # sem página: pontuar pelo snippet depois
             item: dict = {"title": (page.title if page and page.title else hit.title) or hit.url,
                           "url": hit.url, "content": content, "score": 0.0}
             published = (page.published_date if page else None) or hit.published_date
@@ -228,25 +235,28 @@ class SearchTool:
                 item["favicon"] = page.favicon if page else None
             results.append(item)
 
-        self._assign_scores(query, hits, results, raw_scores)
-        order = sorted(range(len(results)), key=lambda i: (-results[i]["score"], hits[i].position, i))
-        images = self._images(request, outcomes) if request.include_images else []
-        return [results[i] for i in order], images
-
-    @staticmethod
-    def _assign_scores(query, hits, results, raw_scores) -> None:
-        """Páginas lidas pontuam pelo melhor trecho; as demais pelo snippet; tudo em [0, 1]."""
-        page_scores = normalize_scores([max(s, 0.0) for s in raw_scores])
-        snippet_texts = [f"{h.title} {h.snippet}" for h in hits]
-        snippet_scores = normalize_scores(BM25(snippet_texts).scores(query)) if hits else []
+        mode = ranked.mode
+        if any(score is None for score in page_scores):
+            snippets = await self._ranker.score_texts(
+                query, [f"{h.title} {h.snippet}" for h in hits], request.ranking if ranked.mode != "bm25" else "bm25")
+            if snippets.warning and snippets.warning not in warnings:
+                warnings.append(snippets.warning)
+            snippet_scores = snippets.scores[0] if snippets.scores else []
+            if all(score is None for score in page_scores):
+                mode = snippets.mode                 # nenhuma página lida: quem ordenou foram os snippets
+        else:
+            snippet_scores = []
         for i, result in enumerate(results):
-            if raw_scores[i] >= 0 and page_scores[i] > 0:
+            if page_scores[i] is not None and page_scores[i] > 0:
                 value = page_scores[i]
             elif snippet_scores and snippet_scores[i] > 0:
                 value = snippet_scores[i] * 0.9        # lê-se menos do que a página inteira
             else:
-                value = 1.0 / (2 + hits[i].position)   # sem termos em comum: ordem do provedor
+                value = 1.0 / (2 + hits[i].position)   # sem sinal: ordem do provedor
             result["score"] = round(min(value, 1.0), 4)
+        order = sorted(range(len(results)), key=lambda i: (-results[i]["score"], hits[i].position, i))
+        images = self._images(request, outcomes) if request.include_images else []
+        return [results[i] for i in order], images, mode, warnings
 
     @staticmethod
     def _images(request, outcomes) -> list[dict]:
